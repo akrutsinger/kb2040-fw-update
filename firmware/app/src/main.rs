@@ -7,7 +7,8 @@ use embassy_rp::dma;
 use embassy_rp::peripherals::{DMA_CH0, PIO0};
 use embassy_rp::pio::{self, Pio};
 use embassy_rp::pio_programs::ws2812::{PioWs2812, PioWs2812Program};
-use embassy_time::Timer;
+use embassy_rp::watchdog::Watchdog;
+use embassy_time::{Duration, Timer};
 use panic_halt as _;
 use smart_leds::RGB8;
 
@@ -16,9 +17,15 @@ bind_interrupts!(struct Irqs {
     DMA_IRQ_0 => dma::InterruptHandler<DMA_CH0>;
 });
 
+const WATCHDOG_TIMEOUT: Duration = Duration::from_secs(8);
+
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
+
+    // The bootloader leaves the watchdog running; take it over and feed it.
+    let mut watchdog = Watchdog::new(p.WATCHDOG);
+    watchdog.start(WATCHDOG_TIMEOUT);
 
     let Pio { mut common, sm0, .. } = Pio::new(p.PIO0, Irqs);
     let program = PioWs2812Program::new(&mut common);
@@ -26,6 +33,7 @@ async fn main(_spawner: Spawner) {
     let mut led = PioWs2812::new(&mut common, sm0, p.DMA_CH0, Irqs, p.PIN_17, &program);
 
     loop {
+        watchdog.feed(WATCHDOG_TIMEOUT);
         led.write(&[RGB8::new(0, 0, 32)]).await;
         Timer::after_secs(1).await;
         led.write(&[RGB8::default()]).await;

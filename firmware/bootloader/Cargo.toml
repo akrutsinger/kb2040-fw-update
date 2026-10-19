@@ -1,6 +1,13 @@
 [package]
 name = "bootloader"
 version = "0.1.0"
-edition = "2024"
+edition.workspace = true
+license.workspace = true
 
 [dependencies]
+embassy-boot-rp = "0.10.0"
+embassy-rp = { version = "0.10.0", features = ["rp2040", "critical-section-impl"] }
+embassy-sync = "0.8.0"
+embassy-time = "0.5.1"
+cortex-m = "0.7.6"
+cortex-m-rt = "0.7"

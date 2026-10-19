@@ -1,6 +1,10 @@
-MEMORY {
-    BOOT2 : ORIGIN = 0x10000000, LENGTH = 0x100
-    /* KB2040 has 8 MB of flash */
-    FLASH : ORIGIN = 0x10000100, LENGTH = 8192K - 0x100
-    RAM   : ORIGIN = 0x20000000, LENGTH = 264K
+INCLUDE memory-layout.x
+REGION_ALIAS("FLASH", ACTIVE);
+
+/* boot2 belongs to the bootloader. Flashing it from the app would erase the
+ * bootloader's first sector. Discarded here rather than with embassy-rp's
+ * boot2-none feature, which a workspace build would also apply to the bootloader. */
+SECTIONS
+{
+  /DISCARD/ : { *(.boot2) }
 }

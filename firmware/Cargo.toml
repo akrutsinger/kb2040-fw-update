@@ -1,7 +1,6 @@
 [workspace]
 resolver = "3"
 members = ["bootloader", "app"]
-default-members = ["app"]
 
 [workspace.package]
 edition = "2024"

@@ -1,20 +1,18 @@
-//! Puts `memory.x` on the linker search path and adds the linker scripts.
+//! Puts `memory.x` and the shared layout on the linker search path and adds the linker scripts.
 
 use std::env;
-use std::fs::File;
-use std::io::Write;
+use std::fs;
 use std::path::PathBuf;
 
 fn main() {
-    let out = &PathBuf::from(env::var_os("OUT_DIR").unwrap());
-    File::create(out.join("memory.x"))
-        .unwrap()
-        .write_all(include_bytes!("memory.x"))
-        .unwrap();
+    let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
+    fs::copy("memory.x", out.join("memory.x")).unwrap();
+    fs::copy("../memory-layout.x", out.join("memory-layout.x")).unwrap();
     println!("cargo:rustc-link-search={}", out.display());
     println!("cargo:rerun-if-changed=memory.x");
+    println!("cargo:rerun-if-changed=../memory-layout.x");
 
+    // No -Tlink-rp.x: boot2 belongs to the bootloader (see memory.x).
     println!("cargo:rustc-link-arg-bins=--nmagic");
     println!("cargo:rustc-link-arg-bins=-Tlink.x");
-    println!("cargo:rustc-link-arg-bins=-Tlink-rp.x");
 }

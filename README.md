@@ -5,8 +5,9 @@ Example for how to do encrypted firmware updates using the Adafruit KB2040 (RP20
 ## Layout
 
 - `firmware/`: cargo workspace
-  - `app/`: the application (currently a NeoPixel blinky)
-  - `bootloader/`: placeholder for the embassy-boot-rp bootloader (not built by default)
+  - `memory-layout.x`: flash partitions shared by both crates (see [Memory layout](#memory-layout))
+  - `app/`: the application (currently a NeoPixel blinky), runs from the ACTIVE partition
+  - `bootloader/`: embassy-boot-rp bootloader, owns boot2 and jumps to ACTIVE
 
 ## Prerequisites
 
@@ -20,11 +21,11 @@ cargo install elf2uf2-rs
 From `firmware/`:
 
 ```sh
-cargo build --release -p app
+cargo build --release              # both crates
+cargo build --release -p app       # just one
 ```
 
-The target (`thumbv6m-none-eabi`) is set in `firmware/.cargo/config.toml`. The workspace
-`default-members` is `app`, so a bare `cargo build` builds only the app.
+The target (`thumbv6m-none-eabi`) is set in `firmware/.cargo/config.toml`.
 
 ## Flash (UF2)
 
@@ -34,11 +35,32 @@ The target (`thumbv6m-none-eabi`) is set in `firmware/.cargo/config.toml`. The w
 2. From `firmware/`:
 
    ```sh
+   cargo run --release -p bootloader   # once, or when the bootloader changes
    cargo run --release -p app
    ```
 
    The runner (`elf2uf2-rs -d`) converts the ELF to UF2 and copies it to the drive. The
-   board reboots into the app on its own and the drive unmounts.
+   board reboots on its own and the drive unmounts, so **each flash needs its own trip into
+   BOOTSEL**. Each UF2 only writes its own partition, so flashing one leaves the other intact.
+
+The app doesn't boots on its own: it has no boot2 and is linked at `0x10007000`, so the
+bootloader must be on the board. Until an app is flashed, the bootloader jumps into erased
+flash, faults and resets in a loop. That's harmless; BOOTSEL still works.
+
+## Memory layout
+
+Defined once in `firmware/memory-layout.x`. Each crate's `memory.x` includes it and points
+`FLASH` at its own region (`REGION_ALIAS`).
+
+| Region           | Start        | Size        | Notes                                              |
+| ---------------- | ------------ | ----------- | -------------------------------------------------- |
+| BOOT2            | `0x10000000` | 256 B       | second-stage boot, linked into the bootloader only |
+| BOOTLOADER       | `0x10000100` | 24K - 256 B |                                                    |
+| BOOTLOADER_STATE | `0x10006000` | 4K          | embassy-boot swap/state flags                      |
+| ACTIVE           | `0x10007000` | 768K        | the running app                                    |
+| DFU              | `0x100C7000` | 772K        | incoming update; ACTIVE + one 4K page for the swap |
+
+Flash after `0x10188000` (about 6.4 MB) is unused.
 
 ## Board notes
 
@@ -46,5 +68,3 @@ The target (`thumbv6m-none-eabi`) is set in `firmware/.cargo/config.toml`. The w
   with embassy-rp's `PioWs2812` (PIO0 + DMA_CH0).
 - I don't think the KB2040 supports a debug probe, so there is no defmt/RTT logging and panics use
   `panic-halt`. USB logging (`embassy-usb-logger`) may be the way to get output later.
-- `firmware/app/memory.x` uses the whole 8 MB of flash after boot2. This will change once
-  the bootloader takes its share.

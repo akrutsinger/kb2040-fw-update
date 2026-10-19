@@ -1,0 +1,2 @@
+INCLUDE memory-layout.x
+REGION_ALIAS("FLASH", BOOTLOADER);
