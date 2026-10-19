@@ -1,0 +1,20 @@
+[workspace]
+resolver = "3"
+members = ["bootloader", "app"]
+default-members = ["app"]
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+publish = false
+
+# Both images are size-sensitive (the bootloader has 24K, the app 768K).
+[profile.release]
+debug = 2          # debug info is not flashed, it only helps defmt
+lto = "fat"
+opt-level = "s"
+codegen-units = 1
+incremental = false
+
+[profile.dev]
+opt-level = "s"    # unoptimized embassy code does not fit the 24K bootloader slot
