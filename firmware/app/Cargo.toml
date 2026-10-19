@@ -20,3 +20,5 @@ embassy-usb = { version = "0.6.0", default-features = false }
 static_cell = "2.1.1"
 cortex-m = "0.7.9"
 portable-atomic = { version = "1.15.0", features = ["critical-section"] }
+embassy-boot-rp = "0.10.0"
+embassy-sync = "0.8.0"

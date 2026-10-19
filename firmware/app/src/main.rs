@@ -1,19 +1,25 @@
 #![no_std]
 #![no_main]
 
-use cortex_m::peripheral::SCB;
+mod console;
+
+use core::cell::RefCell;
+
+use embassy_boot_rp::{AlignedBuffer, BlockingFirmwareUpdater, FirmwareUpdaterConfig, State};
 use embassy_executor::Spawner;
 use embassy_rp::bind_interrupts;
 use embassy_rp::dma;
+use embassy_rp::flash::{Blocking, Flash, WRITE_SIZE};
 use embassy_rp::peripherals::{DMA_CH0, PIO0, USB};
 use embassy_rp::pio::{self, Pio};
 use embassy_rp::pio_programs::ws2812::{Grb, PioWs2812, PioWs2812Program};
 use embassy_rp::usb;
 use embassy_rp::watchdog::Watchdog;
+use embassy_sync::blocking_mutex::Mutex;
+use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_time::{Duration, Timer};
 use embassy_usb::UsbDevice;
-use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
-use embassy_usb::driver::EndpointError;
+use embassy_usb::class::cdc_acm::{self, CdcAcmClass};
 use panic_halt as _;
 use smart_leds::RGB8;
 use static_cell::StaticCell;
@@ -24,12 +30,13 @@ bind_interrupts!(struct Irqs {
     USBCTRL_IRQ => usb::InterruptHandler<USB>;
 });
 
+/// Must match the bootloader's `FLASH_SIZE`.
+const FLASH_SIZE: usize = 8 * 1024 * 1024;
 const WATCHDOG_TIMEOUT: Duration = Duration::from_secs(8);
 /// Change this along with the version so an update is visible at a glance.
 const LED_COLOR: RGB8 = RGB8::new(0, 0, 32);
 
 type Led = PioWs2812<'static, PIO0, 0, 1, Grb>;
-type Serial = CdcAcmClass<'static, usb::Driver<'static, USB>>;
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
@@ -38,6 +45,8 @@ async fn main(spawner: Spawner) {
     // The bootloader leaves the watchdog running; take it over and feed it.
     let mut watchdog = Watchdog::new(p.WATCHDOG);
     watchdog.start(WATCHDOG_TIMEOUT);
+    // Spawning only fails if a task is spawned twice (`SpawnError::Busy`), a bug that shows up on
+    // the first boot, so the `unwrap()`s on these spawns are fine.
     spawner.spawn(watchdog_task(watchdog).unwrap());
 
     let Pio {
@@ -59,7 +68,7 @@ async fn main(spawner: Spawner) {
     static CONFIG_DESC: StaticCell<[u8; 256]> = StaticCell::new();
     static BOS_DESC: StaticCell<[u8; 256]> = StaticCell::new();
     static CONTROL_BUF: StaticCell<[u8; 64]> = StaticCell::new();
-    static CDC_STATE: StaticCell<State> = StaticCell::new();
+    static CDC_STATE: StaticCell<cdc_acm::State> = StaticCell::new();
     let mut builder = embassy_usb::Builder::new(
         driver,
         config,
@@ -68,88 +77,44 @@ async fn main(spawner: Spawner) {
         &mut [],
         CONTROL_BUF.init([0; 64]),
     );
-    let mut serial = CdcAcmClass::new(&mut builder, CDC_STATE.init(State::new()), 64);
+    let mut serial = CdcAcmClass::new(&mut builder, CDC_STATE.init(cdc_acm::State::new()), 64);
     spawner.spawn(usb_task(builder.build()).unwrap());
+
+    // DFU and BOOTLOADER_STATE partitions, from the shared linker layout.
+    let flash = Mutex::<NoopRawMutex, _>::new(RefCell::new(
+        Flash::<_, Blocking, FLASH_SIZE>::new_blocking(p.FLASH),
+    ));
+    let config = FirmwareUpdaterConfig::from_linkerfile_blocking(&flash, &flash);
+    let mut aligned = AlignedBuffer([0; WRITE_SIZE]);
+    let mut updater = BlockingFirmwareUpdater::new(config, &mut aligned.0);
+
+    // Until this image calls `mark_booted`, any reset (panic, watchdog, power loss) makes the
+    // bootloader roll back to the previous image. Nobody is listening on the console this early,
+    // so failures are kept in the note that `status` prints instead of being logged.
+    let boot = match updater.get_state() {
+        Ok(State::Swap) => {
+            // Placeholder self-test: run for a while with USB and the LED up before trusting
+            // this image. The console starts after it.
+            Timer::after_secs(5).await;
+            match updater.mark_booted() {
+                Ok(()) => "update installed",
+                Err(_) => "update not confirmed, next reset rolls back",
+            }
+        }
+        // Confirm the old image again, or the next update is refused.
+        Ok(State::Revert) => match updater.mark_booted() {
+            Ok(()) => "last update failed, rolled back",
+            Err(_) => "rolled back, not re-confirmed, updates refused",
+        },
+        Ok(_) => "normal",
+        Err(_) => "couldn't read boot state",
+    };
 
     loop {
         serial.wait_connection().await;
         // Returns when the host goes away.
-        let _ = console(&mut serial).await;
+        let _ = console::console(&mut serial, boot).await;
     }
-}
-
-struct Disconnected;
-
-impl From<EndpointError> for Disconnected {
-    fn from(_: EndpointError) -> Self {
-        Disconnected
-    }
-}
-
-/// Line-based console: echoes input and runs a command on Enter. Every reply is written as one
-/// packet, so it must fit in 64 bytes.
-///
-/// This isn't the avengers, there's no banner on connect. `wait_connection()` returns when the host
-/// enumerates the device, not when a terminal opens the port, so a banner arrives while `tio` is
-/// still setting up the tty and gets lost. Now, the user just has to press `ENTER` to get to the
-/// prompt.
-async fn console(serial: &mut Serial) -> Result<(), Disconnected> {
-    let mut packet = [0u8; 64];
-    let mut line = [0u8; 64];
-    let mut len = 0;
-    loop {
-        let n = serial.read_packet(&mut packet).await?;
-        for &b in &packet[..n] {
-            match b {
-                // Terminals send CR for Enter.
-                b'\r' => {
-                    serial.write_packet(b"\r\n").await?;
-                    run_command(serial, &line[..len]).await?;
-                    len = 0;
-                    serial.write_packet(b"> ").await?;
-                }
-                // Backspace / DEL
-                0x08 | 0x7f if len > 0 => {
-                    len -= 1;
-                    serial.write_packet(b"\x08 \x08").await?;
-                }
-                0x20..0x7f if len < line.len() => {
-                    line[len] = b;
-                    len += 1;
-                    serial.write_packet(&[b]).await?;
-                }
-                _ => {}
-            }
-        }
-    }
-}
-
-async fn run_command(serial: &mut Serial, line: &[u8]) -> Result<(), Disconnected> {
-    match line.trim_ascii() {
-        b"" => {}
-        b"help" => {
-            serial
-                .write_packet(b"commands: help, version, reboot\r\n")
-                .await?
-        }
-        b"version" => {
-            serial
-                .write_packet(concat!(env!("CARGO_PKG_VERSION"), "\r\n").as_bytes())
-                .await?
-        }
-        b"reboot" => {
-            serial.write_packet(b"rebooting\r\n").await?;
-            // Let the message reach the host before USB goes away.
-            Timer::after_millis(100).await;
-            SCB::sys_reset();
-        }
-        _ => {
-            serial
-                .write_packet(b"unknown command, try 'help'\r\n")
-                .await?
-        }
-    }
-    Ok(())
 }
 
 #[embassy_executor::task]
