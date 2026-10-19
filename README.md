@@ -6,8 +6,8 @@ Example for how to do encrypted firmware updates using the Adafruit KB2040 (RP20
 
 - `firmware/`: cargo workspace
   - `memory-layout.x`: flash partitions shared by both crates (see [Memory layout](#memory-layout))
-  - `app/`: the application (currently a NeoPixel blinky), runs from the ACTIVE partition
-  - `bootloader/`: embassy-boot-rp bootloader, owns boot2 and jumps to ACTIVE
+  - `app/`: the application, runs from the ACTIVE partition
+  - `bootloader/`: [embassy-boot-rp](https://docs.embassy.dev/embassy-boot-rp/0.10.0/default/index.html) bootloader, owns boot2 and jumps to ACTIVE
 
 ## Prerequisites
 
