@@ -8,6 +8,8 @@ MEMORY
   ACTIVE           : ORIGIN = 0x10007000, LENGTH = 768K
   /* DFU must be one erase page (4K) larger than ACTIVE for the swap. */
   DFU              : ORIGIN = 0x100C7000, LENGTH = 768K + 4K
+  /* Reserved for data kept across boots and updates (keys, logs, ...). */
+  STORAGE          : ORIGIN = 0x107F0000, LENGTH = 64K
   RAM              : ORIGIN = 0x20000000, LENGTH = 264K
 }
 

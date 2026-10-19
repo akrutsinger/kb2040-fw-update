@@ -71,8 +71,12 @@ Defined once in `firmware/memory-layout.x`. Each crate's `memory.x` includes it 
 | BOOTLOADER_STATE | `0x10006000` | 4K          | embassy-boot swap/state flags                      |
 | ACTIVE           | `0x10007000` | 768K        | the running app                                    |
 | DFU              | `0x100C7000` | 772K        | incoming update; ACTIVE + one 4K page for the swap |
+| STORAGE          | `0x107F0000` | 64K         | reserved for data kept across boots (end of flash) |
 
-Flash after `0x10188000` (about 6.4 MB) is unused.
+Flash from `0x10188000` to `0x107F0000` (about 6.4 MB) is unused.
+
+App size: use `size target/thumbv6m-none-eabi/release/app` (`text + data` is what gets flashed).
+The ELF file itself is much bigger because of debug info.
 
 ## Board notes
 
