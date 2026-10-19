@@ -55,6 +55,13 @@ cargo clippy
    board reboots on its own and the drive unmounts, so **each flash needs its own trip into
    BOOTSEL**. Each UF2 only writes its own partition, so flashing one leaves the other intact.
 
+3. The app shows up as a USB serial port (`lsusb` shows `c0de:cafe kb2040-fw-update KB2040 console`).
+   Open it with `tio /dev/ttyACM0` (or whatever device yours is). The app prints nothing until you
+   type, so press **ENTER** to get the `> ` prompt, then try `help`.
+
+   The port needs the `dialout` group (`sudo usermod -aG dialout $USER`, then log back in, or as a
+   temporary fix, run `newgrp dialout` in the shell until then).
+
 The app doesn't boot on its own: it has no boot2 and is linked at `0x10007000`, so the
 bootloader must be on the board. Until an app is flashed, the bootloader jumps into erased
 flash, faults and resets in a loop. That's harmless; BOOTSEL still works.
