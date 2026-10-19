@@ -27,6 +27,18 @@ cargo build --release -p app       # just one
 
 The target (`thumbv6m-none-eabi`) is set in `firmware/.cargo/config.toml`.
 
+## Check / lint
+
+From `firmware/`:
+
+```sh
+cargo check
+cargo clippy
+```
+
+- Run them from inside `firmware/`. With `--manifest-path` from the repo root, cargo doesn't
+  see `.cargo/config.toml` and builds for the host (`unwinding panics are not supported without std`).
+
 ## Flash (UF2)
 
 1. Put the board in BOOTSEL: hold **BOOT** and tap **RESET** (or plug in while holding BOOT).
@@ -43,7 +55,7 @@ The target (`thumbv6m-none-eabi`) is set in `firmware/.cargo/config.toml`.
    board reboots on its own and the drive unmounts, so **each flash needs its own trip into
    BOOTSEL**. Each UF2 only writes its own partition, so flashing one leaves the other intact.
 
-The app doesn't boots on its own: it has no boot2 and is linked at `0x10007000`, so the
+The app doesn't boot on its own: it has no boot2 and is linked at `0x10007000`, so the
 bootloader must be on the board. Until an app is flashed, the bootloader jumps into erased
 flash, faults and resets in a loop. That's harmless; BOOTSEL still works.
 
