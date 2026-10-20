@@ -133,10 +133,12 @@ The board writes the image to DFU, then reads it back and checks the signature a
 signed image gets `ERR signature check failed`, and the board keeps running the current one.
 `upload.py` refuses files that aren't `.signed` output before talking to the board.
 
-Checking the signature takes about 2.6 s for a 36 KB image (about 14 KB/s), and the board can't
-feed the watchdog meanwhile. With an 8 s timeout, images over about 100 KB get reset mid-check.
-That's safe, since the image isn't marked and the old one keeps running, but `upload.py` only
-reports `finish: no reply`, which isn't clear and can be confusing.
+Checking the signature takes about 2.6 s for a 36 KB image and 2.7 s for a 78 KB one: almost all
+of it is the fixed cost of the Ed25519 math, and hashing adds only about 0.1 s per 40 KB. The board
+can't feed the watchdog meanwhile (8 s timeout), but even a full 768 KB image should take only
+about 4.5 s. If it ever ran over, the board would reset mid-check. That's safe, since the image
+isn't marked and the old one keeps running, but `upload.py` only reports `finish: no reply`, which
+isn't clear and can be confusing.
 
 On reboot the bootloader swaps it into ACTIVE and
 boots it on trial: after a 5 s self-test the app confirms itself (`mark_booted`). If it panics,
