@@ -9,7 +9,7 @@ publish = false
 
 # Both images are size-sensitive (the bootloader has 24K, the app 768K).
 [profile.release]
-debug = 2          # debug info is not flashed, it only helps defmt
+debug = 2          # debug info is not flashed, it only helps tools like addr2line and objdump
 lto = "fat"
 opt-level = "s"
 codegen-units = 1
