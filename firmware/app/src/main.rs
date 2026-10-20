@@ -2,9 +2,11 @@
 #![no_main]
 
 mod console;
+mod identity;
 mod update;
 
 use core::cell::RefCell;
+use core::convert::Infallible;
 
 use embassy_boot_rp::{AlignedBuffer, BlockingFirmwareUpdater, FirmwareUpdaterConfig, State};
 use embassy_executor::Spawner;
@@ -27,6 +29,7 @@ use panic_halt as _;
 use smart_leds::RGB8;
 use static_cell::StaticCell;
 use tpm::SpiInterface;
+use tpm::interface::spi::SpiError;
 
 bind_interrupts!(struct Irqs {
     PIO0_IRQ_0 => pio::InterruptHandler<PIO0>;
@@ -43,6 +46,7 @@ const LED_COLOR: RGB8 = RGB8::new(0, 0, 32);
 type Led = PioWs2812<'static, PIO0, 0, 1, Grb>;
 /// The TPM9670 board, see the README for wiring.
 pub type Tpm = tpm::Tpm<SpiInterface<Spi<'static, SPI0, Async>, Output<'static>>, Delay>;
+pub type TpmError = tpm::Error<SpiError<spi::Error, Infallible>>;
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {

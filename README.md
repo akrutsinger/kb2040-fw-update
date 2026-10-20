@@ -69,6 +69,13 @@ host target, since `.cargo/config.toml` defaults to the board:
 cargo test -p tpm --target x86_64-unknown-linux-gnu
 ```
 
+One more test runs the TPM2 commands against [swtpm](https://github.com/stefanberger/swtpm), a
+software TPM 2.0 (`dnf install swtpm`). It's skipped by default:
+
+```sh
+cargo test -p tpm --target x86_64-unknown-linux-gnu -- --include-ignored
+```
+
 ## Flash (UF2)
 
 1. Put the board in BOOTSEL: hold **BOOT** and tap **RESET** (or plug in while holding BOOT).
@@ -193,8 +200,29 @@ driving it (missing, unpowered, or CS# not reaching it), MISO picks up noise fro
 wires. That shows up as `ERR TPM never ready`, an unexpected vendor, or a locality that's never
 granted. Check CS#, MISO, and power.
 
+### Identity key
+
+`pubkey` prints the board's identity key, a P-256 ECDSA signing key that the TPM generated and
+never lets out. It's printed as a SEC1 uncompressed point in hex (`04 || x || y`):
+
+```
+> pubkey
+created identity key
+04a1b2...
+```
+
+- The first `pubkey` creates the key (TPM2_CreatePrimary in the owner hierarchy) and makes it
+  persistent at handle `0x81000002`. After that, `pubkey` just reads it back, across resets and
+  power loss. Clearing the TPM deletes it; a new one would then be different.
+- It's a signing key only, unrestricted so it can sign any challenge (roadmap step 4). Key
+  agreement for encrypted updates will get its own key.
+- Creating it needs the owner hierarchy's password to be empty, which it is on a fresh TPM. If the
+  TPM was used elsewhere and has an owner password, `pubkey` fails with an authorization error
+  such as `ERR TPM error [TPM_RC_BAD_AUTH, session[1]]`.
+
 The driver (`firmware/tpm/`) follows the register interface and SPI protocol of the TCG
-"PC Client Platform TPM Profile (PTP) Specification". It takes an `SpiBus` plus a CS# pin rather
+"PC Client Platform TPM Profile (PTP) Specification". TPM2 commands and responses are encoded and
+decoded by [`tpm2-protocol`](https://crates.io/crates/tpm2-protocol) (`no_std`, no allocation). It takes an `SpiBus` plus a CS# pin rather
 than an `SpiDevice`, because the TPM can stretch a transfer with wait states (see
 `tpm/src/interface/spi.rs`).
 

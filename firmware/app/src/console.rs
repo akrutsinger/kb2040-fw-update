@@ -12,7 +12,7 @@ use embassy_usb::driver::EndpointError;
 use embedded_storage::nor_flash::NorFlash;
 use heapless::String;
 
-use crate::{Tpm, update};
+use crate::{Tpm, identity, update};
 
 pub type Serial = CdcAcmClass<'static, usb::Driver<'static, USB>>;
 
@@ -24,8 +24,8 @@ impl From<EndpointError> for Disconnected {
     }
 }
 
-/// Line-based console: echoes input and runs a command on Enter. Every reply is written as one
-/// packet, so it must fit in 64 bytes.
+/// Line-based console: echoes input and runs a command on Enter. Most replies are written as one
+/// packet, so they must fit in 64 bytes; longer ones go through [`write_all`].
 ///
 /// This isn't the avengers, there's no banner on connect. `wait_connection()` returns when the host
 /// enumerates the device, not when a terminal opens the port, so a banner arrives while `tio` is
@@ -78,7 +78,7 @@ async fn run_command<DFU: NorFlash, STATE: NorFlash>(
         b"" => {}
         b"help" => {
             serial
-                .write_packet(b"commands: help, version, status, tpm, reboot, update\r\n")
+                .write_packet(b"commands: help, version, status, tpm, pubkey, reboot, update\r\n")
                 .await?
         }
         b"version" => {
@@ -95,6 +95,7 @@ async fn run_command<DFU: NorFlash, STATE: NorFlash>(
             serial.write_packet(b"\r\n").await?;
         }
         b"tpm" => tpm_info(serial, tpm).await?,
+        b"pubkey" => pubkey(serial, tpm).await?,
         b"reboot" => {
             serial.write_packet(b"rebooting\r\n").await?;
             reset().await;
@@ -156,6 +157,41 @@ async fn tpm_info(serial: &mut Serial, tpm: &mut Tpm) -> Result<(), Disconnected
         Err(e) => write!(reply, "ERR {e}\r\n"),
     };
     serial.write_packet(reply.as_bytes()).await?;
+    Ok(())
+}
+
+/// Prints the identity key as a SEC1 uncompressed point in hex, creating it on first use.
+async fn pubkey(serial: &mut Serial, tpm: &mut Tpm) -> Result<(), Disconnected> {
+    // 65 bytes of key in hex, plus CR LF.
+    let mut reply = String::<132>::new();
+    // Every reply fits, so `write!` can't fail.
+    match identity::public_key(tpm).await {
+        Ok((key, created)) => {
+            if created {
+                serial.write_packet(b"created identity key\r\n").await?;
+            }
+            for b in key.to_sec1() {
+                let _ = write!(reply, "{b:02x}");
+            }
+            let _ = write!(reply, "\r\n");
+        }
+        Err(e) => {
+            let _ = write!(reply, "ERR {e}\r\n");
+        }
+    }
+    write_all(serial, reply.as_bytes()).await
+}
+
+/// Writes `data` in as many packets as it takes. A full last packet is followed by an empty one,
+/// which is how USB marks the end of a transfer.
+async fn write_all(serial: &mut Serial, data: &[u8]) -> Result<(), Disconnected> {
+    let size = usize::from(serial.max_packet_size());
+    for packet in data.chunks(size) {
+        serial.write_packet(packet).await?;
+    }
+    if data.len().is_multiple_of(size) {
+        serial.write_packet(&[]).await?;
+    }
     Ok(())
 }
 
