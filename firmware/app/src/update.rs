@@ -1,4 +1,4 @@
-//! Receive a raw app image over the console and stage it in DFU for the bootloader.
+//! Receive a signed app image over the console and stage it in DFU for the bootloader.
 //!
 //! Protocol, after the console reads `update` (integers are little-endian):
 //!
@@ -6,11 +6,14 @@
 //! 2. Host: `u32` image length, a non-zero multiple of [`BLOCK_SIZE`] that fits in ACTIVE.
 //!    Device: `A`
 //! 3. Host: one [`BLOCK_SIZE`] block. Device writes it to DFU, then answers `A`. Repeat.
-//! 4. Device: `OK\r\n`, then resets so the bootloader swaps the image in.
+//! 4. Host: the 64-byte Ed25519 signature of `sha512(image)`, made with [`UPDATE_KEY`]'s private
+//!    half (`tools/sign.py`). Device reads the image back from DFU, checks the signature, and only
+//!    then marks it. Device: `OK\r\n`, then resets so the bootloader swaps the image in.
 //!
 //! Any step can fail with `ERR <reason>\r\n` instead. The host waits for each `A` before sending
 //! more, so the device never receives more than it asked for.
 
+use embassy_boot::FirmwareUpdaterError;
 use embassy_boot_rp::{BlockingFirmwareUpdater, State};
 use embassy_time::{Duration, with_timeout};
 use embassy_usb::driver::EndpointError;
@@ -22,6 +25,8 @@ use crate::console::Serial;
 const BLOCK_SIZE: usize = 4096;
 /// How long to wait for the host before giving up.
 const RX_TIMEOUT: Duration = Duration::from_secs(5);
+/// Public half of the update signing key, extracted from `keys/update.pub` by `build.rs`.
+static UPDATE_KEY: &[u8; 32] = include_bytes!(concat!(env!("OUT_DIR"), "/update.pub"));
 
 pub enum Error {
     Disconnected,
@@ -30,6 +35,7 @@ pub enum Error {
     BadLength,
     TooMuchData,
     Flash,
+    Signature,
 }
 
 impl From<EndpointError> for Error {
@@ -47,6 +53,7 @@ impl Error {
             Error::BadLength => "length must be n * 4096 and fit in ACTIVE",
             Error::TooMuchData => "got more data than asked for",
             Error::Flash => "flash write failed",
+            Error::Signature => "signature check failed",
         }
     }
 }
@@ -79,7 +86,16 @@ pub async fn receive<DFU: NorFlash, STATE: NorFlash>(
             .map_err(|_| Error::Flash)?;
         serial.write_packet(b"A").await?;
     }
-    updater.mark_updated().map_err(|_| Error::Flash)
+
+    let mut signature = [0u8; 64];
+    read_exact(serial, &mut signature).await?;
+    // Blocks the executor (and the watchdog feeder) while it hashes the image.
+    updater
+        .verify_and_mark_updated(UPDATE_KEY, &signature, len as u32)
+        .map_err(|e| match e {
+            FirmwareUpdaterError::Signature(_) => Error::Signature,
+            _ => Error::Flash,
+        })
 }
 
 /// Fill `buf` from as many packets as it takes.

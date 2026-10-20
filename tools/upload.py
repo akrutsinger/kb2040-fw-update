@@ -3,9 +3,11 @@
 # requires-python = ">=3.11"
 # dependencies = ["pyserial"]
 # ///
-"""Send a raw app image to the KB2040 over its USB serial console.
+"""Send a signed app image to the KB2040 over its USB serial console.
 
-usage: uv run tools/upload.py PORT IMAGE.bin
+usage: uv run tools/upload.py PORT IMAGE.signed
+
+Make IMAGE.signed with `uv run tools/sign.py IMAGE.bin`.
 
 The protocol is described at the top of firmware/app/src/update.rs.
 """
@@ -20,6 +22,9 @@ import serial
 BLOCK_SIZE = 4096
 # Seconds to wait for each reply from the device.
 TIMEOUT = 5
+# Seconds to wait for the final reply, while the device hashes and verifies the image.
+VERIFY_TIMEOUT = 30
+SIGNATURE_SIZE = 64
 
 
 def fail(what, reply):
@@ -39,9 +44,12 @@ def main():
         sys.exit(__doc__)
     port_name, path = sys.argv[1:]
     with open(path, "rb") as f:
-        image = f.read()
-    # The device takes whole blocks; pad like erased flash.
-    image += b"\xff" * (-len(image) % BLOCK_SIZE)
+        data = f.read()
+    if len(data) <= SIGNATURE_SIZE or (len(data) - SIGNATURE_SIZE) % BLOCK_SIZE:
+        sys.exit(
+            f"{path} is not a signed image; sign it first: uv run tools/sign.py IMAGE.bin"
+        )
+    image, signature = data[:-SIGNATURE_SIZE], data[-SIGNATURE_SIZE:]
 
     with serial.Serial(port_name, timeout=TIMEOUT) as port:
         # Get a fresh prompt, then start the update.
@@ -76,7 +84,11 @@ def main():
             )
         print()
 
+        port.write(signature)
+        start = time.monotonic()
+        port.timeout = VERIFY_TIMEOUT
         line = port.readline()
+        print(f"verified in {time.monotonic() - start:.1f} s")
         if line.strip() != b"OK":
             fail("finish", line)
     print("done, the board is rebooting into the new image")

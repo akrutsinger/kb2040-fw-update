@@ -8,7 +8,9 @@ Example for how to do encrypted firmware updates using the Adafruit KB2040 (RP20
   - `memory-layout.x`: flash partitions shared by both crates (see [Memory layout](#memory-layout))
   - `app/`: the application, runs from the ACTIVE partition
   - `bootloader/`: [embassy-boot-rp](https://docs.embassy.dev/embassy-boot-rp/0.10.0/default/index.html) bootloader, owns boot2 and jumps to ACTIVE
-- `tools/upload.py`: sends a new app image to the board over USB serial (see [Update over USB](#update-over-usb))
+- `tools/sign.py`: signs app images with the update key
+- `tools/upload.py`: sends a signed app image to the board over USB serial (see [Update over USB](#update-over-usb))
+- `keys/update.pub`: public half of the signing key (OpenSSH format), built into the app
 
 ## Prerequisites
 
@@ -18,7 +20,23 @@ cargo install elf2uf2-rs
 cargo install cargo-binutils && rustup component add llvm-tools   # cargo objcopy, for updates
 ```
 
-[uv](https://docs.astral.sh/uv/) runs `tools/upload.py` and fetches its dependency (pyserial).
+[uv](https://docs.astral.sh/uv/) runs the scripts in `tools/` and fetches their dependencies
+(pyserial, cryptography).
+
+### Signing key
+
+The app only accepts updates signed with the project's Ed25519 key. It's a plain OpenSSH key, so
+make it once with `ssh-keygen`, from the repo root:
+
+```sh
+ssh-keygen -t ed25519 -N "" -C kb2040-fw-update -f keys/update
+```
+
+This writes `keys/update` (private) and `keys/update.pub` (`ssh-ed25519 …` line). Commit
+`update.pub`: the app's `build.rs` extracts the raw key from it and builds it in. Keep
+`keys/update` safe and out of git (it's in `.gitignore`): anyone who has it can sign images the
+board will install, and if it's lost, boards can only be updated by BOOTSEL. `sign.py` doesn't
+support passphrases yet, so the key must be unencrypted (`-N ""`).
 
 ## Build
 
@@ -82,13 +100,25 @@ console instead of BOOTSEL.
    cargo objcopy --release -p app -- -O binary target/app.bin
    ```
 
-3. Close tio (two programs on one port split the data between them), then from the repo root:
+3. From the repo root, sign it. This pads the image to whole 4 KB blocks and writes
+   `firmware/target/app.signed` (image followed by its 64-byte signature):
 
    ```sh
-   uv run tools/upload.py /dev/ttyACM0 firmware/target/app.bin
+   uv run tools/sign.py firmware/target/app.bin
    ```
 
-The board writes the image to DFU, marks it, and reboots. The bootloader swaps it into ACTIVE and
+4. Close tio (two programs on one port split the data between them), then:
+
+   ```sh
+   uv run tools/upload.py /dev/ttyACM0 firmware/target/app.signed
+   ```
+
+The board writes the image to DFU, then reads it back and checks the signature against
+`keys/update.pub`. Only then does it mark the image and reboot. An unsigned, tampered or wrongly
+signed image gets `ERR signature check failed`, and the board keeps running the current one.
+`upload.py` refuses files that aren't `.signed` output before talking to the board.
+
+On reboot the bootloader swaps it into ACTIVE and
 boots it on trial: after a 5 s self-test the app confirms itself (`mark_booted`). If it panics,
 hangs (watchdog, 8 s) or resets before that, the bootloader rolls back to the previous image.
 `status` on the console shows which happened. The protocol is described at the top of
