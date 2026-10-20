@@ -11,23 +11,26 @@ use embassy_executor::Spawner;
 use embassy_rp::bind_interrupts;
 use embassy_rp::dma;
 use embassy_rp::flash::{Blocking, Flash, WRITE_SIZE};
-use embassy_rp::peripherals::{DMA_CH0, PIO0, USB};
+use embassy_rp::gpio::{Level, Output};
+use embassy_rp::peripherals::{DMA_CH0, DMA_CH1, DMA_CH2, PIO0, SPI0, USB};
 use embassy_rp::pio::{self, Pio};
 use embassy_rp::pio_programs::ws2812::{Grb, PioWs2812, PioWs2812Program};
+use embassy_rp::spi::{self, Async, Spi};
 use embassy_rp::usb;
 use embassy_rp::watchdog::Watchdog;
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
-use embassy_time::{Duration, Timer};
+use embassy_time::{Delay, Duration, Timer};
 use embassy_usb::UsbDevice;
 use embassy_usb::class::cdc_acm::{self, CdcAcmClass};
 use panic_halt as _;
 use smart_leds::RGB8;
 use static_cell::StaticCell;
+use tpm::SpiInterface;
 
 bind_interrupts!(struct Irqs {
     PIO0_IRQ_0 => pio::InterruptHandler<PIO0>;
-    DMA_IRQ_0 => dma::InterruptHandler<DMA_CH0>;
+    DMA_IRQ_0 => dma::InterruptHandler<DMA_CH0>, dma::InterruptHandler<DMA_CH1>, dma::InterruptHandler<DMA_CH2>;
     USBCTRL_IRQ => usb::InterruptHandler<USB>;
 });
 
@@ -38,6 +41,8 @@ const WATCHDOG_TIMEOUT: Duration = Duration::from_secs(8);
 const LED_COLOR: RGB8 = RGB8::new(0, 0, 32);
 
 type Led = PioWs2812<'static, PIO0, 0, 1, Grb>;
+/// The TPM9670 board, see the README for wiring.
+pub type Tpm = tpm::Tpm<SpiInterface<Spi<'static, SPI0, Async>, Output<'static>>, Delay>;
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
@@ -81,6 +86,22 @@ async fn main(spawner: Spawner) {
     let mut serial = CdcAcmClass::new(&mut builder, CDC_STATE.init(cdc_acm::State::new()), 64);
     spawner.spawn(usb_task(builder.build()).unwrap());
 
+    // TPM on SPI0: SCK GP18, MOSI GP19, MISO GP20, CS# GP10. Mode 0 at 1 MHz (the default) is
+    // slow but safe over jumper wires; the SLB 9670 takes up to 43 MHz. Only the `tpm` command
+    // talks to it, so a missing TPM can't get in the way of updates.
+    let spi = Spi::new(
+        p.SPI0,
+        p.PIN_18,
+        p.PIN_19,
+        p.PIN_20,
+        p.DMA_CH1,
+        p.DMA_CH2,
+        Irqs,
+        spi::Config::default(),
+    );
+    let cs = Output::new(p.PIN_10, Level::High);
+    let mut tpm = Tpm::new(SpiInterface::new(spi, cs), Delay);
+
     // DFU and BOOTLOADER_STATE partitions, from the shared linker layout.
     let flash = Mutex::<NoopRawMutex, _>::new(RefCell::new(
         Flash::<_, Blocking, FLASH_SIZE>::new_blocking(p.FLASH),
@@ -114,7 +135,7 @@ async fn main(spawner: Spawner) {
     loop {
         serial.wait_connection().await;
         // Returns when the host goes away.
-        let _ = console::console(&mut serial, boot, &mut updater).await;
+        let _ = console::console(&mut serial, boot, &mut updater, &mut tpm).await;
     }
 }
 

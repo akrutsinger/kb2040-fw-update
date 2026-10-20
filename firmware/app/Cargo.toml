@@ -24,6 +24,8 @@ embassy-boot-rp = "0.10.0"
 embassy-boot = { version = "0.7.0", features = ["ed25519-salty"] }
 embassy-sync = "0.8.0"
 embedded-storage = "0.3.2"
+heapless = "0.9.3"
+tpm = { path = "../tpm" }
 
 [build-dependencies]
 base64 = "0.22.1"

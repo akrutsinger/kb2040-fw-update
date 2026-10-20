@@ -1,5 +1,7 @@
 //! Line-based console over USB serial.
 
+use core::fmt::Write;
+
 use cortex_m::peripheral::SCB;
 use embassy_boot_rp::BlockingFirmwareUpdater;
 use embassy_rp::peripherals::USB;
@@ -8,8 +10,9 @@ use embassy_time::{Duration, Timer, with_timeout};
 use embassy_usb::class::cdc_acm::CdcAcmClass;
 use embassy_usb::driver::EndpointError;
 use embedded_storage::nor_flash::NorFlash;
+use heapless::String;
 
-use crate::update;
+use crate::{Tpm, update};
 
 pub type Serial = CdcAcmClass<'static, usb::Driver<'static, USB>>;
 
@@ -32,6 +35,7 @@ pub async fn console<DFU: NorFlash, STATE: NorFlash>(
     serial: &mut Serial,
     boot: &str,
     updater: &mut BlockingFirmwareUpdater<'_, DFU, STATE>,
+    tpm: &mut Tpm,
 ) -> Result<(), Disconnected> {
     let mut packet = [0u8; 64];
     let mut line = [0u8; 64];
@@ -43,7 +47,7 @@ pub async fn console<DFU: NorFlash, STATE: NorFlash>(
                 // Terminals send CR for Enter.
                 b'\r' => {
                     serial.write_packet(b"\r\n").await?;
-                    run_command(serial, &line[..len], boot, updater).await?;
+                    run_command(serial, &line[..len], boot, updater, tpm).await?;
                     len = 0;
                     serial.write_packet(b"> ").await?;
                 }
@@ -68,12 +72,13 @@ async fn run_command<DFU: NorFlash, STATE: NorFlash>(
     line: &[u8],
     boot: &str,
     updater: &mut BlockingFirmwareUpdater<'_, DFU, STATE>,
+    tpm: &mut Tpm,
 ) -> Result<(), Disconnected> {
     match line.trim_ascii() {
         b"" => {}
         b"help" => {
             serial
-                .write_packet(b"commands: help, version, status, reboot, update\r\n")
+                .write_packet(b"commands: help, version, status, tpm, reboot, update\r\n")
                 .await?
         }
         b"version" => {
@@ -89,6 +94,7 @@ async fn run_command<DFU: NorFlash, STATE: NorFlash>(
             serial.write_packet(boot.as_bytes()).await?;
             serial.write_packet(b"\r\n").await?;
         }
+        b"tpm" => tpm_info(serial, tpm).await?,
         b"reboot" => {
             serial.write_packet(b"rebooting\r\n").await?;
             reset().await;
@@ -118,6 +124,38 @@ async fn run_command<DFU: NorFlash, STATE: NorFlash>(
                 .await?
         }
     }
+    Ok(())
+}
+
+/// TCG vendor ID of Infineon, who make the SLB 9670.
+const INFINEON: u16 = 0x15D1;
+
+/// Prints the TPM's IDs, then takes locality 0. A wrong vendor usually means wiring: MISO floats
+/// when the TPM isn't driving it, so the ID reads as noise.
+async fn tpm_info(serial: &mut Serial, tpm: &mut Tpm) -> Result<(), Disconnected> {
+    let mut reply = String::<64>::new();
+    // Every reply fits, so `write!` can't fail.
+    let _ = match tpm.id().await {
+        Ok(id) if id.vid == INFINEON => write!(
+            reply,
+            "Infineon TPM, did {:04x} rid {:02x}\r\n",
+            id.did, id.rid
+        ),
+        Ok(id) => write!(
+            reply,
+            "ERR unexpected vendor {:04x}, check wiring\r\n",
+            id.vid
+        ),
+        Err(e) => write!(reply, "ERR {e}\r\n"),
+    };
+    serial.write_packet(reply.as_bytes()).await?;
+
+    reply.clear();
+    let _ = match tpm.request_locality().await {
+        Ok(()) => write!(reply, "locality 0 active\r\n"),
+        Err(e) => write!(reply, "ERR {e}\r\n"),
+    };
+    serial.write_packet(reply.as_bytes()).await?;
     Ok(())
 }
 

@@ -8,6 +8,7 @@ Example for how to do encrypted firmware updates using the Adafruit KB2040 (RP20
   - `memory-layout.x`: flash partitions shared by both crates (see [Memory layout](#memory-layout))
   - `app/`: the application, runs from the ACTIVE partition
   - `bootloader/`: [embassy-boot-rp](https://docs.embassy.dev/embassy-boot-rp/0.10.0/default/index.html) bootloader, owns boot2 and jumps to ACTIVE
+  - `tpm/`: async driver for the TPM (see [TPM](#tpm)), a platform-agnostic library the app uses
 - `tools/sign.py`: signs app images with the update key
 - `tools/upload.py`: sends a signed app image to the board over USB serial (see [Update over USB](#update-over-usb))
 - `keys/update.pub`: public half of the signing key (OpenSSH format), built into the app
@@ -43,7 +44,7 @@ support passphrases yet, so the key must be unencrypted (`-N ""`).
 From `firmware/`:
 
 ```sh
-cargo build --release              # both crates
+cargo build --release              # all crates
 cargo build --release -p app       # just one
 ```
 
@@ -60,6 +61,13 @@ cargo clippy
 
 - Run them from inside `firmware/`. With `--manifest-path` from the repo root, cargo doesn't
   see `.cargo/config.toml` and builds for the host (`unwinding panics are not supported without std`).
+
+The `tpm` driver has host tests (SPI framing and register logic, against mocks). They need the
+host target, since `.cargo/config.toml` defaults to the board:
+
+```sh
+cargo test -p tpm --target x86_64-unknown-linux-gnu
+```
 
 ## Flash (UF2)
 
@@ -148,9 +156,52 @@ Flash from `0x10188000` to `0x107F0000` (about 6.4 MB) is unused.
 App size: use `size target/thumbv6m-none-eabi/release/app` (`text + data` is what gets flashed).
 The ELF file itself is much bigger because of debug info.
 
+## TPM
+
+A [52Pi TPM9670](https://wiki.52pi.com/index.php/EP-0149) board: an Infineon
+[SLB 9670](https://www.infineon.com/assets/row/public/documents/30/49/infineon-slb-9670vq2.0-datasheet-en.pdf)
+TPM 2.0 on a 26-pin Raspberry Pi header. The wiki only labels power and the SPI data pins; CS# is
+on CE1 (pin 26), per the Raspberry Pi `tpm-slb9670` overlay.
+
+| TPM9670 pin | Signal | KB2040     |
+| ----------- | ------ | ---------- |
+| 1           | 3.3 V  | 3V         |
+| 6           | GND    | GND        |
+| 19          | MOSI   | MO (GP19)  |
+| 21          | MISO   | MI (GP20)  |
+| 23          | SCLK   | SCK (GP18) |
+| 26          | CS#    | D9 (GP9)   |
+
+- RST# and PIRQ# stay unconnected. RST# has an internal pull-up, and the datasheet (section 5.5)
+  warns that asserting it at the wrong moment can trip the TPM's dictionary-attack defenses. So
+  resetting the KB2040 (watchdog, update) doesn't reset the TPM.
+- SPI runs in mode 0 at 1 MHz, which is safe over jumper wires. The chip takes up to 43 MHz.
+- CS# is on D9 because the D10 header pin on my KB2040 doesn't reach GP10: it reads 0 V while the
+  firmware drives GP10 high. With CS# floating, the TPM answers with consistent garbage. If the
+  TPM misbehaves, check that CS# idles at 3.3 V first.
+
+`tpm` on the console reads the ID registers, then requests locality 0:
+
+```
+> tpm
+Infineon TPM, did 001b rid 10
+locality 0 active
+```
+
+Anything else is almost always wiring. embassy-rp leaves MISO floating, so when the TPM isn't
+driving it (missing, unpowered, or CS# not reaching it), MISO picks up noise from the neighboring
+wires. That shows up as `ERR TPM never ready`, an unexpected vendor, or a locality that's never
+granted. Check CS#, MISO, and power.
+
+The driver (`firmware/tpm/`) follows the register interface and SPI protocol of the TCG
+"PC Client Platform TPM Profile (PTP) Specification". It takes an `SpiBus` plus a CS# pin rather
+than an `SpiDevice`, because the TPM can stretch a transfer with wait states (see
+`tpm/src/interface/spi.rs`).
+
 ## Board notes
 
 - The KB2040 has no plain LED, only a WS2812 NeoPixel on **GPIO17**. The app drives it
   with embassy-rp's `PioWs2812` (PIO0 + DMA_CH0).
+- SPI0 with DMA_CH1 and DMA_CH2 drives the TPM (see [TPM](#tpm)).
 - I don't think the KB2040 supports a debug probe, so there is no defmt/RTT logging and panics use
   `panic-halt`. USB logging (`embassy-usb-logger`) may be the way to get output later.
