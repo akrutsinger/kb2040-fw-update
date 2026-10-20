@@ -12,6 +12,7 @@ Example for how to do encrypted firmware updates using the Adafruit KB2040 (RP20
 - `tools/sign.py`: signs app images with the update key
 - `tools/upload.py`: sends a signed app image to the board over USB serial (see [Update over USB](#update-over-usb))
 - `tools/challenge.py`: checks that the board holds its identity key (see [Identity key](#identity-key))
+- `tools/tpmfactoryupd-openssl11.patch`: lets Infineon's TPM firmware tool build on a current Raspberry Pi OS (see [TPM 1.2 firmware](#tpm-12-firmware))
 - `keys/update.pub`: public half of the signing key (OpenSSH format), built into the app
 
 ## Prerequisites
@@ -254,35 +255,53 @@ Steps:
    | `AOM-TPM-9670VH_7.62.3126.0.zip`                         | `2c9fc9111ea46200c11dbbb5579dad36` |
    | `TPM_FU_v1.01.2529.00_ToolsOnly_Linux_SourceCode.tar.gz` | `a0c2dae43b28f42134047ab8e6b0d3ac` |
 
-3. **Build the tool:**
+3. **Build the tool.** The source is from 2017, so two fixes are needed for a current Raspberry Pi
+   OS (gcc 14, OpenSSL 3): don't turn warnings into errors, and port `Crypt.c` to the OpenSSL 1.1
+   API with `tools/tpmfactoryupd-openssl11.patch` from this repo (copy it to the Pi):
 
    ```sh
+   cd ~
    sudo apt install build-essential libssl-dev
    mkdir tpmfu && tar xzf TPM_FU_v1.01.2529.00_ToolsOnly_Linux_SourceCode.tar.gz -C tpmfu
+   patch tpmfu/Source/Common/Crypt/Linux/Crypt.c < tpmfactoryupd-openssl11.patch
    cd tpmfu/Source/TPMFactoryUpd
+   sed -i 's/-Werror/-Wno-error/' makefile
    make
    ```
 
-   The makefile is from 2018 and turns warnings into errors (`-Werror`). If the build stops on
-   OpenSSL deprecation warnings, run `sed -i 's/-Werror/-Wno-error/' makefile` and `make` again.
+   The OpenSSL deprecation warnings that remain are harmless: OpenSSL 3 still has those functions.
 
-4. **Check the TPM:** `sudo ./TPMFactoryUpd -info`. It should say TPM family 1.2, firmware
-   6.40.190.0 (or another version from the list above), and show the remaining updates and whether
-   the TPM 1.2 is enabled, activated and owned.
+4. **Check the TPM:** `sudo ./TPMFactoryUpd -info`. Mine said:
 
-5. **Update.** Unzip the Supermicro package and run the tool from its `Firmware` folder, where the
-   config file finds the images:
-
-   ```sh
-   cd AOM-TPM-9670VH_7.62.3126.0/Firmware
-   sudo /path/to/tpmfu/Source/TPMFactoryUpd/TPMFactoryUpd -update config-file -config TPM20_latest.cfg
+   ```
+   TPM family                        :    1.2
+   TPM firmware version              :    6.40.190.0
+   TPM enabled                       :    No
+   TPM activated                     :    No
+   TPM owner set                     :    No
+   TPM deferred physical presence    :    No (Settable)
+   Remaining updates                 :    64
    ```
 
-   `TPM20_latest.cfg` picks the image for the installed version (here
-   `TPM12_6.40.190.0_to_TPM20_7.62.3126.0.BIN`) and the update type `tpm12-takeownership`. As the
-   name suggests, that one takes ownership of the TPM 1.2 for the update, so it presumably needs an
-   enabled, activated TPM without an owner. If the update refuses, the tool's manual
-   (`Doc/TPMFactoryUpd_UserManual.pdf` in the tarball) covers the other update types.
+   Also make sure nothing else uses the TPM during the update: `sudo lsof /dev/tpm0` should print
+   nothing, and `/sys/class/misc/hw_random/rng_current` shouldn't be `tpm-rng-0`.
+
+5. **Update.** Unzip the Supermicro package. Which update type works depends on `-info`
+   (the tool's manual, `Doc/TPMFactoryUpd_UserManual.pdf` in the tarball, section 5.4):
+
+   - **Owner not set, deferred physical presence `Yes` or `No (Settable)`** (the state above):
+     `tpm12-PP`, naming the image for the installed version:
+
+     ```sh
+     cd ~/AOM-TPM-9670VH_7.62.3126.0/Firmware
+     sudo ~/tpmfu/Source/TPMFactoryUpd/TPMFactoryUpd -update tpm12-PP \
+         -firmware TPM12_6.40.190.0_to_TPM20_7.62.3126.0.BIN -log update.log
+     ```
+
+   - **Enabled, activated, owner not set:** the package's config file also works. It picks the image
+     itself and uses `tpm12-takeownership`, which needs exactly that state:
+     `sudo ~/tpmfu/Source/TPMFactoryUpd -update config-file -config TPM20_latest.cfg`, run from the
+     `Firmware` folder.
 
 6. **Verify:** reboot the Pi, then `sudo ./TPMFactoryUpd -info` should say TPM family 2.0, firmware
    7.62.3126.0. Move the TPM9670 back to the KB2040, and `tpm` should end with `TPM 2.0, started`.
