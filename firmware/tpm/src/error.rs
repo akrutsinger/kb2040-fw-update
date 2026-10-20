@@ -27,6 +27,9 @@ pub enum Error<E> {
     Tpm(TpmRc),
     /// The persistent handle holds a key, but not one made from this driver's template.
     UnexpectedKey,
+    /// The TPM answered in TPM 1.2 format: it runs TPM 1.2 firmware, which has none of the TPM 2.0
+    /// commands. Infineon's SLB 9670 can be switched to TPM 2.0 firmware (see README).
+    Tpm12,
 }
 
 impl<E: fmt::Display> fmt::Display for Error<E> {
@@ -42,6 +45,7 @@ impl<E: fmt::Display> fmt::Display for Error<E> {
             Self::Protocol(e) => write!(f, "bad TPM message: {e}"),
             Self::Tpm(rc) => write!(f, "TPM error {rc}"),
             Self::UnexpectedKey => write!(f, "a different key is at that handle"),
+            Self::Tpm12 => write!(f, "TPM runs TPM 1.2 firmware, needs 2.0 (see README)"),
         }
     }
 }

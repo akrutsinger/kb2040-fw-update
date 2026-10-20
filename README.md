@@ -11,6 +11,7 @@ Example for how to do encrypted firmware updates using the Adafruit KB2040 (RP20
   - `tpm/`: async driver for the TPM (see [TPM](#tpm)), a platform-agnostic library the app uses
 - `tools/sign.py`: signs app images with the update key
 - `tools/upload.py`: sends a signed app image to the board over USB serial (see [Update over USB](#update-over-usb))
+- `tools/challenge.py`: checks that the board holds its identity key (see [Identity key](#identity-key))
 - `keys/update.pub`: public half of the signing key (OpenSSH format), built into the app
 
 ## Prerequisites
@@ -179,28 +180,116 @@ on CE1 (pin 26), per the Raspberry Pi `tpm-slb9670` overlay.
 | 19          | MOSI   | MO (GP19)  |
 | 21          | MISO   | MI (GP20)  |
 | 23          | SCLK   | SCK (GP18) |
-| 26          | CS#    | D9 (GP9)   |
+| 26          | CS#    | D10 (GP10) |
 
 - RST# and PIRQ# stay unconnected. RST# has an internal pull-up, and the datasheet (section 5.5)
   warns that asserting it at the wrong moment can trip the TPM's dictionary-attack defenses. So
   resetting the KB2040 (watchdog, update) doesn't reset the TPM.
 - SPI runs in mode 0 at 1 MHz, which is safe over jumper wires. The chip takes up to 43 MHz.
-- CS# is on D9 because the D10 header pin on my KB2040 doesn't reach GP10: it reads 0 V while the
-  firmware drives GP10 high. With CS# floating, the TPM answers with consistent garbage. If the
-  TPM misbehaves, check that CS# idles at 3.3 V first.
 
-`tpm` on the console reads the ID registers, then requests locality 0:
+`tpm` on the console reads the ID registers, requests locality 0, and starts the TPM:
 
 ```
 > tpm
 Infineon TPM, did 001b rid 10
 locality 0 active
+TPM 2.0, started
 ```
 
-Anything else is almost always wiring. embassy-rp leaves MISO floating, so when the TPM isn't
-driving it (missing, unpowered, or CS# not reaching it), MISO picks up noise from the neighboring
-wires. That shows up as `ERR TPM never ready`, an unexpected vendor, or a locality that's never
-granted. Check CS#, MISO, and power.
+If the first two lines fail, it's almost always wiring. embassy-rp leaves MISO floating, so when the
+TPM isn't driving it (missing, unpowered, or CS# not reaching it), MISO picks up noise from the
+neighboring wires. That shows up as `ERR TPM never ready`, an unexpected vendor, or a locality
+that's never granted. Check CS#, MISO, and power. If only the third line fails with
+`ERR TPM runs TPM 1.2 firmware`, see the next section.
+
+### TPM 1.2 firmware
+
+The SLB 9670 is sold with either TPM 1.2 or TPM 2.0 firmware. It's the same chip with the same
+device ID (`001b`), so wiring and `tpm`'s first two lines can't tell them apart. Everything here
+needs TPM 2.0: TPM 1.2 has none of its commands, no elliptic curves (only RSA and SHA-1), and
+Infineon's TPM 1.2 firmware before 6.43 generates weak RSA keys
+([ROCA, CVE-2017-15361](https://nvd.nist.gov/vuln/detail/CVE-2017-15361)). My TPM9670 was sold as
+TPM 2.0 but came with TPM 1.2 firmware 6.40.190.0.
+
+How it shows up:
+
+- `tpm`: `ERR TPM runs TPM 1.2 firmware, needs 2.0 (see README)` on the third line. `pubkey` and
+  `sign` fail with the same message. A TPM 1.2 answers TPM 2.0 commands in its own format (tag
+  `0x00C4`), which the driver recognizes.
+- A hint in the registers: `INTF_CAPS` bits 30..28 read `010` (TIS 1.3, the TPM 1.2 interface)
+  instead of `011`. The revision ID also differs between the firmwares (`10` on mine).
+
+#### Switching it to TPM 2.0
+
+Infineon's `TPMFactoryUpd` can change the firmware between TPM 1.2 and TPM 2.0. It runs on Linux
+against `/dev/tpm0`, so the easiest place is a Raspberry Pi, which the TPM9670 plugs straight onto.
+Infineon doesn't publish the 1.2-to-2.0 image itself, but Supermicro does, for its own SLB 9670
+module. Its package goes from TPM 1.2 6.40.190.0 (and 6.41 to 6.43) to TPM 2.0 7.62.3126.0, which
+has the ROCA fix and everything this project needs.
+
+Before you start:
+
+- **Don't interrupt the update** (power, Ctrl-C, reboot). An interrupted update must be resumed with
+  the exact same image, and only a few resume attempts are allowed. Use a solid power supply.
+- **The number of firmware updates is limited.** `-info` shows how many are left.
+- Anything stored in the TPM is lost. Nothing here depends on the TPM 1.2 contents.
+
+Steps:
+
+1. **Raspberry Pi:** install Raspberry Pi OS. Add these lines to `/boot/firmware/config.txt`,
+   power off, plug the TPM9670 onto header pins 1 to 26 (its pin 1 on the Pi's pin 1), and boot:
+
+   ```
+   dtparam=spi=on
+   dtoverlay=tpm-slb9670
+   ```
+
+   `ls /dev/tpm0` should show the device, and `dmesg | grep -i tpm` a 1.2 TPM.
+
+2. **Download** from <https://www.supermicro.com/wdl/driver/TPM/> and check the MD5s against
+   Supermicro's `CheckSum.txt` there:
+
+   | File                                                     | MD5                                |
+   | -------------------------------------------------------- | ---------------------------------- |
+   | `AOM-TPM-9670VH_7.62.3126.0.zip`                         | `2c9fc9111ea46200c11dbbb5579dad36` |
+   | `TPM_FU_v1.01.2529.00_ToolsOnly_Linux_SourceCode.tar.gz` | `a0c2dae43b28f42134047ab8e6b0d3ac` |
+
+3. **Build the tool:**
+
+   ```sh
+   sudo apt install build-essential libssl-dev
+   mkdir tpmfu && tar xzf TPM_FU_v1.01.2529.00_ToolsOnly_Linux_SourceCode.tar.gz -C tpmfu
+   cd tpmfu/Source/TPMFactoryUpd
+   make
+   ```
+
+   The makefile is from 2018 and turns warnings into errors (`-Werror`). If the build stops on
+   OpenSSL deprecation warnings, run `sed -i 's/-Werror/-Wno-error/' makefile` and `make` again.
+
+4. **Check the TPM:** `sudo ./TPMFactoryUpd -info`. It should say TPM family 1.2, firmware
+   6.40.190.0 (or another version from the list above), and show the remaining updates and whether
+   the TPM 1.2 is enabled, activated and owned.
+
+5. **Update.** Unzip the Supermicro package and run the tool from its `Firmware` folder, where the
+   config file finds the images:
+
+   ```sh
+   cd AOM-TPM-9670VH_7.62.3126.0/Firmware
+   sudo /path/to/tpmfu/Source/TPMFactoryUpd/TPMFactoryUpd -update config-file -config TPM20_latest.cfg
+   ```
+
+   `TPM20_latest.cfg` picks the image for the installed version (here
+   `TPM12_6.40.190.0_to_TPM20_7.62.3126.0.BIN`) and the update type `tpm12-takeownership`. As the
+   name suggests, that one takes ownership of the TPM 1.2 for the update, so it presumably needs an
+   enabled, activated TPM without an owner. If the update refuses, the tool's manual
+   (`Doc/TPMFactoryUpd_UserManual.pdf` in the tarball) covers the other update types.
+
+6. **Verify:** reboot the Pi, then `sudo ./TPMFactoryUpd -info` should say TPM family 2.0, firmware
+   7.62.3126.0. Move the TPM9670 back to the KB2040, and `tpm` should end with `TPM 2.0, started`.
+
+If `/dev/tpm0` doesn't appear after an interrupted update, the kernel driver likely gave up because
+the TPM's self-test failed in its half-updated state. The tarball's `Kernel/` folder has kernel
+patches that ignore that failure, so the update can be resumed.
 
 ### Identity key
 
@@ -216,17 +305,30 @@ created identity key
 - The first `pubkey` creates the key (TPM2_CreatePrimary in the owner hierarchy) and makes it
   persistent at handle `0x81000002`. After that, `pubkey` just reads it back, across resets and
   power loss. Clearing the TPM deletes it; a new one would then be different.
-- It's a signing key only, unrestricted so it can sign any challenge (roadmap step 4). Key
+- It's a signing key only, unrestricted so the TPM signs any digest the firmware gives it. Key
   agreement for encrypted updates will get its own key.
 - Creating it needs the owner hierarchy's password to be empty, which it is on a fresh TPM. If the
   TPM was used elsewhere and has an owner password, `pubkey` fails with an authorization error
   such as `ERR TPM error [TPM_RC_BAD_AUTH, session[1]]`.
 
+`sign <nonce>` proves the board holds the key. The nonce is 32 random bytes in hex (64 digits). The
+board signs `SHA-256("kb2040-fw-update/challenge/v1" || nonce)` and prints the ECDSA signature,
+`r || s` in hex. The fixed prefix keeps `sign` from being used to sign anything else with this
+key. `tools/challenge.py` does the whole exchange with a fresh nonce and checks the signature
+(close tio first):
+
+```sh
+uv run tools/challenge.py /dev/ttyACM0
+```
+
+It verifies against the key the board itself reports, so it proves the board holds that key, not
+that it's the board you expect. Pinning known keys comes with the Worker (roadmap step 5).
+
 The driver (`firmware/tpm/`) follows the register interface and SPI protocol of the TCG
 "PC Client Platform TPM Profile (PTP) Specification". TPM2 commands and responses are encoded and
-decoded by [`tpm2-protocol`](https://crates.io/crates/tpm2-protocol) (`no_std`, no allocation). It takes an `SpiBus` plus a CS# pin rather
-than an `SpiDevice`, because the TPM can stretch a transfer with wait states (see
-`tpm/src/interface/spi.rs`).
+decoded by [`tpm2-protocol`](https://crates.io/crates/tpm2-protocol) (`no_std`, no allocation). It
+takes an `SpiBus` plus a CS# pin rather than an `SpiDevice`, because the TPM can stretch a transfer
+with wait states (see `tpm/src/interface/spi.rs`).
 
 ## Board notes
 

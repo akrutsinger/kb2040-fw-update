@@ -38,7 +38,8 @@ pub async fn console<DFU: NorFlash, STATE: NorFlash>(
     tpm: &mut Tpm,
 ) -> Result<(), Disconnected> {
     let mut packet = [0u8; 64];
-    let mut line = [0u8; 64];
+    // Room for `sign` and its 64 hex digits.
+    let mut line = [0u8; 128];
     let mut len = 0;
     loop {
         let n = serial.read_packet(&mut packet).await?;
@@ -77,9 +78,11 @@ async fn run_command<DFU: NorFlash, STATE: NorFlash>(
     match line.trim_ascii() {
         b"" => {}
         b"help" => {
-            serial
-                .write_packet(b"commands: help, version, status, tpm, pubkey, reboot, update\r\n")
-                .await?
+            write_all(
+                serial,
+                b"commands: help, version, status, tpm, pubkey, sign, reboot, update\r\n",
+            )
+            .await?
         }
         b"version" => {
             serial
@@ -96,6 +99,7 @@ async fn run_command<DFU: NorFlash, STATE: NorFlash>(
         }
         b"tpm" => tpm_info(serial, tpm).await?,
         b"pubkey" => pubkey(serial, tpm).await?,
+        cmd if cmd.starts_with(b"sign ") => sign(serial, tpm, &cmd[5..]).await?,
         b"reboot" => {
             serial.write_packet(b"rebooting\r\n").await?;
             reset().await;
@@ -131,8 +135,9 @@ async fn run_command<DFU: NorFlash, STATE: NorFlash>(
 /// TCG vendor ID of Infineon, who make the SLB 9670.
 const INFINEON: u16 = 0x15D1;
 
-/// Prints the TPM's IDs, then takes locality 0. A wrong vendor usually means wiring: MISO floats
-/// when the TPM isn't driving it, so the ID reads as noise.
+/// Prints the TPM's IDs, takes locality 0, and starts the TPM, which also shows whether it runs
+/// TPM 2.0 firmware. A wrong vendor usually means wiring: MISO floats when the TPM isn't driving
+/// it, so the ID reads as noise.
 async fn tpm_info(serial: &mut Serial, tpm: &mut Tpm) -> Result<(), Disconnected> {
     let mut reply = String::<64>::new();
     // Every reply fits, so `write!` can't fail.
@@ -157,6 +162,13 @@ async fn tpm_info(serial: &mut Serial, tpm: &mut Tpm) -> Result<(), Disconnected
         Err(e) => write!(reply, "ERR {e}\r\n"),
     };
     serial.write_packet(reply.as_bytes()).await?;
+
+    reply.clear();
+    let _ = match tpm.startup().await {
+        Ok(()) => write!(reply, "TPM 2.0, started\r\n"),
+        Err(e) => write!(reply, "ERR {e}\r\n"),
+    };
+    serial.write_packet(reply.as_bytes()).await?;
     Ok(())
 }
 
@@ -170,9 +182,7 @@ async fn pubkey(serial: &mut Serial, tpm: &mut Tpm) -> Result<(), Disconnected> 
             if created {
                 serial.write_packet(b"created identity key\r\n").await?;
             }
-            for b in key.to_sec1() {
-                let _ = write!(reply, "{b:02x}");
-            }
+            push_hex(&mut reply, &key.to_sec1());
             let _ = write!(reply, "\r\n");
         }
         Err(e) => {
@@ -180,6 +190,50 @@ async fn pubkey(serial: &mut Serial, tpm: &mut Tpm) -> Result<(), Disconnected> 
         }
     }
     write_all(serial, reply.as_bytes()).await
+}
+
+/// `sign <nonce>`: signs a challenge with the identity key and prints the signature, `r || s` in
+/// hex. The nonce is 64 hex digits; see [`identity`] for what gets signed.
+async fn sign(serial: &mut Serial, tpm: &mut Tpm, nonce: &[u8]) -> Result<(), Disconnected> {
+    // 64 bytes of signature in hex, plus CR LF.
+    let mut reply = String::<130>::new();
+    // Every reply fits, so `write!` can't fail.
+    match parse_hex::<{ identity::NONCE_LEN }>(nonce.trim_ascii()) {
+        None => {
+            let _ = write!(reply, "ERR nonce must be 64 hex digits\r\n");
+        }
+        Some(nonce) => match identity::sign_challenge(tpm, &nonce).await {
+            Ok(signature) => {
+                push_hex(&mut reply, &signature.r);
+                push_hex(&mut reply, &signature.s);
+                let _ = write!(reply, "\r\n");
+            }
+            Err(e) => {
+                let _ = write!(reply, "ERR {e}\r\n");
+            }
+        },
+    }
+    write_all(serial, reply.as_bytes()).await
+}
+
+/// Appends `bytes` in lowercase hex. The caller sizes `out` for it.
+fn push_hex<const N: usize>(out: &mut String<N>, bytes: &[u8]) {
+    for b in bytes {
+        let _ = write!(out, "{b:02x}");
+    }
+}
+
+/// Exactly `2 * N` hex digits, either case.
+fn parse_hex<const N: usize>(hex: &[u8]) -> Option<[u8; N]> {
+    if hex.len() != 2 * N {
+        return None;
+    }
+    let mut out = [0; N];
+    for (byte, pair) in out.iter_mut().zip(hex.as_chunks::<2>().0) {
+        let pair = core::str::from_utf8(pair).ok()?;
+        *byte = u8::from_str_radix(pair, 16).ok()?;
+    }
+    Some(out)
 }
 
 /// Writes `data` in as many packets as it takes. A full last packet is followed by an empty one,

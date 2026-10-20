@@ -12,6 +12,8 @@ use std::process::{Child, Command};
 use std::time::{Duration, SystemTime};
 
 use embedded_hal_mock::eh1::delay::NoopDelay;
+use p256::ecdsa::signature::hazmat::PrehashVerifier;
+use p256::ecdsa::{Signature as EcdsaSignature, VerifyingKey};
 use tpm::registers::{ACCESS, DATA_FIFO, STS};
 use tpm::tpm2_protocol::data::TpmRcBase;
 use tpm::{Interface, Tpm};
@@ -131,6 +133,17 @@ async fn startup_sends_the_spec_bytes_and_accepts_already_started() {
 }
 
 #[tokio::test]
+async fn tpm_1_2_firmware_is_recognized() {
+    let backend = |_: &[u8]| {
+        // What an SLB 9670 with TPM 1.2 firmware answers to TPM2_Startup: tag TPM_ST_RSP_COMMAND,
+        // TPM_BADTAG.
+        vec![0x00, 0xC4, 0, 0, 0, 0x0A, 0, 0, 0, 0x1E]
+    };
+    let mut tpm = Tpm::new(FifoTpm::new(backend), NoopDelay);
+    assert_eq!(tpm.startup().await, Err(tpm::Error::Tpm12));
+}
+
+#[tokio::test]
 async fn tpm_errors_come_back_as_response_codes() {
     // TPM_RC_FAILURE.
     let backend = |_: &[u8]| vec![0x80, 0x01, 0, 0, 0, 0x0A, 0, 0, 0x01, 0x01];
@@ -220,4 +233,14 @@ async fn identity_key_flow_against_swtpm() {
     let (again, key) = tpm.create_signing_key().await.unwrap();
     assert_eq!(key, persisted);
     tpm.flush(again).await.unwrap();
+
+    // The persisted key signs, and p256 accepts the signature for that digest only.
+    let digest = [0x5A; 32];
+    let signature = tpm.sign(PERSISTENT, &digest).await.unwrap();
+    let verifier = VerifyingKey::from_sec1_bytes(&persisted.to_sec1()).unwrap();
+    let signature = EcdsaSignature::from_scalars(signature.r, signature.s).unwrap();
+    verifier
+        .verify_prehash(&digest, &signature)
+        .expect("bad signature");
+    assert!(verifier.verify_prehash(&[0xA5; 32], &signature).is_err());
 }

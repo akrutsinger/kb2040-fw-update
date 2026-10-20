@@ -9,15 +9,16 @@ use embedded_hal_async::delay::DelayNs;
 use tpm2_protocol::TpmWriter;
 use tpm2_protocol::basic::TpmHandle;
 use tpm2_protocol::data::{
-    Tpm2bPublic, TpmAlgId, TpmEccCurve, TpmRc, TpmRcBase, TpmRh, TpmSt, TpmSu, TpmaObject,
-    TpmsAuthCommand, TpmsEccParms, TpmsEccPoint, TpmsSchemeHash, TpmtEccScheme, TpmtKdfScheme,
-    TpmtPublic, TpmtSymDefObject, TpmuAsymScheme, TpmuPublicId, TpmuPublicParms,
+    Tpm2bDigest, Tpm2bPublic, TpmAlgId, TpmEccCurve, TpmRc, TpmRcBase, TpmRh, TpmSt, TpmSu,
+    TpmaObject, TpmsAuthCommand, TpmsEccParms, TpmsEccPoint, TpmsSchemeHash, TpmtEccScheme,
+    TpmtKdfScheme, TpmtPublic, TpmtSigScheme, TpmtSymDefObject, TpmtTkHashcheck, TpmuAsymScheme,
+    TpmuPublicId, TpmuPublicParms, TpmuSignature,
 };
 use tpm2_protocol::frame::{
     TpmCreatePrimaryCommand, TpmCreatePrimaryResponse, TpmEvictControlCommand,
     TpmEvictControlResponse, TpmFlushContextCommand, TpmFlushContextResponse, TpmFrame,
-    TpmReadPublicCommand, TpmReadPublicResponse, TpmResponse, TpmStartupCommand,
-    TpmStartupResponse, TpmUnmarshalBody, tpm_marshal_command,
+    TpmReadPublicCommand, TpmReadPublicResponse, TpmResponse, TpmSignCommand, TpmSignResponse,
+    TpmStartupCommand, TpmStartupResponse, TpmUnmarshalBody, tpm_marshal_command,
 };
 
 use crate::device::Tpm;
@@ -44,6 +45,13 @@ impl PublicKey {
         out[33..].copy_from_slice(&self.y);
         out
     }
+}
+
+/// An ECDSA P-256 signature.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Signature {
+    pub r: [u8; 32],
+    pub s: [u8; 32],
 }
 
 impl<I: Interface, D: DelayNs> Tpm<I, D> {
@@ -106,6 +114,38 @@ impl<I: Interface, D: DelayNs> Tpm<I, D> {
         Ok(())
     }
 
+    /// TPM2_Sign: signs `digest`, a SHA-256 hash, with `key`, a key made by
+    /// [`create_signing_key`](Self::create_signing_key).
+    pub async fn sign(
+        &mut self,
+        key: u32,
+        digest: &[u8; 32],
+    ) -> Result<Signature, Error<I::Error>> {
+        let command = TpmSignCommand {
+            handles: [TpmHandle::new(key)],
+            digest: Tpm2bDigest::try_from(&digest[..]).map_err(Error::Protocol)?,
+            // NULL: use the key's own scheme, ECDSA-SHA256.
+            in_scheme: TpmtSigScheme::default(),
+            // A NULL ticket. Only restricted keys need proof that the TPM made the digest.
+            validation: TpmtTkHashcheck {
+                tag: TpmSt::HashCheck,
+                hierarchy: TpmRh::Null,
+                digest: Default::default(),
+            },
+        };
+        let response: TpmSignResponse = self.run(&command, &[password()]).await?;
+        let TpmuSignature::Ecdsa(signature) = response.signature.signature else {
+            return Err(Error::UnexpectedKey);
+        };
+        match (
+            scalar(&signature.signature_r),
+            scalar(&signature.signature_s),
+        ) {
+            (Some(r), Some(s)) => Ok(Signature { r, s }),
+            _ => Err(Error::UnexpectedKey),
+        }
+    }
+
     /// TPM2_ReadPublic on a key made by [`create_signing_key`](Self::create_signing_key).
     ///
     /// `None` if `handle` is empty. [`Error::UnexpectedKey`] if it holds a key made from a
@@ -145,12 +185,25 @@ impl<I: Interface, D: DelayNs> Tpm<I, D> {
         let len = self
             .execute(&command_buf[..command_len], &mut response_buf)
             .await?;
+        // A TPM 1.2 answers TPM 2.0 commands in its own format, tagged TPM_ST_RSP_COMMAND. A TPM 2.0
+        // only uses that tag to reject a command with a bad tag, which this driver never sends.
+        if u16::from_be_bytes([response_buf[0], response_buf[1]]) == TpmSt::RspCommand as u16 {
+            return Err(Error::Tpm12);
+        }
         let response = TpmResponse::cast(&response_buf[..len]).map_err(Error::Protocol)?;
         match response.rc().map_err(Error::Protocol)? {
             TpmRc::Fmt0(TpmRcBase::Success) => response.unmarshal().map_err(Error::Protocol),
             rc => Err(Error::Tpm(rc)),
         }
     }
+}
+
+/// A P-256 scalar, left-padded to 32 bytes in case the TPM dropped leading zeros.
+fn scalar(bytes: &[u8]) -> Option<[u8; 32]> {
+    let mut out = [0; 32];
+    out.get_mut(32usize.checked_sub(bytes.len())?..)?
+        .copy_from_slice(bytes);
+    Some(out)
 }
 
 fn owner() -> TpmHandle {

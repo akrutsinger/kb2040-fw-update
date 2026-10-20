@@ -1,6 +1,9 @@
 [target.'cfg(all(target_arch = "arm", target_os = "none"))']
 # Converts the ELF to UF2 and copies it to the RPI-RP2 drive (board in BOOTSEL).
 runner = "elf2uf2-rs -d"
+# sha2's compact SHA-256: 9 KB smaller than the default unrolled one, and only short messages
+# get hashed here.
+rustflags = ["--cfg", 'sha2_backend_soft="compact"']
 
 [build]
 target = "thumbv6m-none-eabi"
