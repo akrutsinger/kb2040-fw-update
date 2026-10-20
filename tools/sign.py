@@ -27,10 +27,24 @@ BLOCK_SIZE = 4096
 KEY = Path(__file__).resolve().parent.parent / "keys" / "update"
 
 
-def sign(path):
-    key = load_ssh_private_key(KEY.read_bytes(), password=None)
+def load_key():
+    keygen = f'ssh-keygen -t ed25519 -N "" -f {KEY}'
+    try:
+        key = load_ssh_private_key(KEY.read_bytes(), password=None)
+    except FileNotFoundError:
+        sys.exit(f"{KEY} not found; make it with: {keygen}")
+    except TypeError:
+        # What cryptography raises for a passphrase-protected key.
+        sys.exit(f"{KEY} has a passphrase; sign.py only supports unencrypted keys")
+    except ValueError as e:
+        sys.exit(f"{KEY} is not an OpenSSH private key ({e}); make one with: {keygen}")
     if not isinstance(key, Ed25519PrivateKey):
-        sys.exit(f"{KEY} is not an Ed25519 key")
+        sys.exit(f"{KEY} is not an Ed25519 key; make one with: {keygen}")
+    return key
+
+
+def sign(path):
+    key = load_key()
     image = Path(path).read_bytes()
     # The device takes whole blocks; pad like erased flash.
     image += b"\xff" * (-len(image) % BLOCK_SIZE)

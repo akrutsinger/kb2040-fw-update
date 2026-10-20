@@ -34,7 +34,8 @@ pub enum Error {
     Timeout,
     BadLength,
     TooMuchData,
-    Flash,
+    FlashWrite,
+    FlashVerify,
     Signature,
 }
 
@@ -52,7 +53,8 @@ impl Error {
             Error::Timeout => "timed out waiting for data",
             Error::BadLength => "length must be n * 4096 and fit in ACTIVE",
             Error::TooMuchData => "got more data than asked for",
-            Error::Flash => "flash write failed",
+            Error::FlashWrite => "writing the image to flash failed",
+            Error::FlashVerify => "flash error while verifying the image",
             Error::Signature => "signature check failed",
         }
     }
@@ -83,7 +85,10 @@ pub async fn receive<DFU: NorFlash, STATE: NorFlash>(
         // Erases the sector before writing it.
         updater
             .write_firmware(offset, &block)
-            .map_err(|_| Error::Flash)?;
+            .map_err(|e| match e {
+                FirmwareUpdaterError::BadState => Error::NotConfirmed,
+                _ => Error::FlashWrite,
+            })?;
         serial.write_packet(b"A").await?;
     }
 
@@ -94,7 +99,9 @@ pub async fn receive<DFU: NorFlash, STATE: NorFlash>(
         .verify_and_mark_updated(UPDATE_KEY, &signature, len as u32)
         .map_err(|e| match e {
             FirmwareUpdaterError::Signature(_) => Error::Signature,
-            _ => Error::Flash,
+            FirmwareUpdaterError::BadState => Error::NotConfirmed,
+            // Reading the image back, or writing the mark.
+            FirmwareUpdaterError::Flash(_) => Error::FlashVerify,
         })
 }
 
