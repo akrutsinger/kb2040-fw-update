@@ -8,13 +8,17 @@ Example for how to do encrypted firmware updates using the Adafruit KB2040 (RP20
   - `memory-layout.x`: flash partitions shared by both crates (see [Memory layout](#memory-layout))
   - `app/`: the application, runs from the ACTIVE partition
   - `bootloader/`: [embassy-boot-rp](https://docs.embassy.dev/embassy-boot-rp/0.10.0/default/index.html) bootloader, owns boot2 and jumps to ACTIVE
+- `tools/upload.py`: sends a new app image to the board over USB serial (see [Update over USB](#update-over-usb))
 
 ## Prerequisites
 
 ```sh
 rustup target add thumbv6m-none-eabi
 cargo install elf2uf2-rs
+cargo install cargo-binutils && rustup component add llvm-tools   # cargo objcopy, for updates
 ```
+
+[uv](https://docs.astral.sh/uv/) runs `tools/upload.py` and fetches its dependency (pyserial).
 
 ## Build
 
@@ -65,6 +69,30 @@ cargo clippy
 The app doesn't boot on its own: it has no boot2 and is linked at `0x10007000`, so the
 bootloader must be on the board. Until an app is flashed, the bootloader jumps into erased
 flash, faults and resets in a loop. That's harmless; BOOTSEL still works.
+
+## Update over USB
+
+Once the bootloader and an app are on the board, new app images can go over the USB serial
+console instead of BOOTSEL.
+
+1. Bump `version` in `firmware/app/Cargo.toml` (and `LED_COLOR` in `main.rs` to see the change).
+2. From `firmware/`, build a raw image:
+
+   ```sh
+   cargo objcopy --release -p app -- -O binary target/app.bin
+   ```
+
+3. Close tio (two programs on one port split the data between them), then from the repo root:
+
+   ```sh
+   uv run tools/upload.py /dev/ttyACM0 firmware/target/app.bin
+   ```
+
+The board writes the image to DFU, marks it, and reboots. The bootloader swaps it into ACTIVE and
+boots it on trial: after a 5 s self-test the app confirms itself (`mark_booted`). If it panics,
+hangs (watchdog, 8 s) or resets before that, the bootloader rolls back to the previous image.
+`status` on the console shows which happened. The protocol is described at the top of
+`firmware/app/src/update.rs`.
 
 ## Memory layout
 

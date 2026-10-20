@@ -23,6 +23,7 @@ dependencies = [
  "embassy-sync",
  "embassy-time",
  "embassy-usb",
+ "embedded-storage",
  "panic-halt",
  "portable-atomic",
  "smart-leds",

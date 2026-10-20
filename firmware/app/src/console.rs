@@ -1,11 +1,15 @@
 //! Line-based console over USB serial.
 
 use cortex_m::peripheral::SCB;
+use embassy_boot_rp::BlockingFirmwareUpdater;
 use embassy_rp::peripherals::USB;
 use embassy_rp::usb;
-use embassy_time::Timer;
+use embassy_time::{Duration, Timer, with_timeout};
 use embassy_usb::class::cdc_acm::CdcAcmClass;
 use embassy_usb::driver::EndpointError;
+use embedded_storage::nor_flash::NorFlash;
+
+use crate::update;
 
 pub type Serial = CdcAcmClass<'static, usb::Driver<'static, USB>>;
 
@@ -24,7 +28,11 @@ impl From<EndpointError> for Disconnected {
 /// enumerates the device, not when a terminal opens the port, so a banner arrives while `tio` is
 /// still setting up the tty and gets lost. Now, the user just has to press `ENTER` to get to the
 /// prompt.
-pub async fn console(serial: &mut Serial, boot: &str) -> Result<(), Disconnected> {
+pub async fn console<DFU: NorFlash, STATE: NorFlash>(
+    serial: &mut Serial,
+    boot: &str,
+    updater: &mut BlockingFirmwareUpdater<'_, DFU, STATE>,
+) -> Result<(), Disconnected> {
     let mut packet = [0u8; 64];
     let mut line = [0u8; 64];
     let mut len = 0;
@@ -35,7 +43,7 @@ pub async fn console(serial: &mut Serial, boot: &str) -> Result<(), Disconnected
                 // Terminals send CR for Enter.
                 b'\r' => {
                     serial.write_packet(b"\r\n").await?;
-                    run_command(serial, &line[..len], boot).await?;
+                    run_command(serial, &line[..len], boot, updater).await?;
                     len = 0;
                     serial.write_packet(b"> ").await?;
                 }
@@ -55,12 +63,17 @@ pub async fn console(serial: &mut Serial, boot: &str) -> Result<(), Disconnected
     }
 }
 
-async fn run_command(serial: &mut Serial, line: &[u8], boot: &str) -> Result<(), Disconnected> {
+async fn run_command<DFU: NorFlash, STATE: NorFlash>(
+    serial: &mut Serial,
+    line: &[u8],
+    boot: &str,
+    updater: &mut BlockingFirmwareUpdater<'_, DFU, STATE>,
+) -> Result<(), Disconnected> {
     match line.trim_ascii() {
         b"" => {}
         b"help" => {
             serial
-                .write_packet(b"commands: help, version, status, reboot\r\n")
+                .write_packet(b"commands: help, version, status, reboot, update\r\n")
                 .await?
         }
         b"version" => {
@@ -78,10 +91,27 @@ async fn run_command(serial: &mut Serial, line: &[u8], boot: &str) -> Result<(),
         }
         b"reboot" => {
             serial.write_packet(b"rebooting\r\n").await?;
-            // Let the message reach the host before USB goes away.
-            Timer::after_millis(100).await;
-            SCB::sys_reset();
+            reset().await;
         }
+        // Normally sent by `tools/upload.py`, not typed.
+        b"update" => match update::receive(serial, updater).await {
+            Ok(()) => {
+                serial.write_packet(b"OK\r\n").await?;
+                reset().await;
+            }
+            Err(update::Error::Disconnected) => return Err(Disconnected),
+            Err(e) => {
+                serial.write_packet(b"ERR ").await?;
+                serial.write_packet(e.message().as_bytes()).await?;
+                serial.write_packet(b"\r\n").await?;
+                // Drop whatever the host still sends, so it isn't read as typed input.
+                let mut packet = [0u8; 64];
+                while let Ok(Ok(_)) =
+                    with_timeout(Duration::from_millis(100), serial.read_packet(&mut packet)).await
+                {
+                }
+            }
+        },
         _ => {
             serial
                 .write_packet(b"unknown command, try 'help'\r\n")
@@ -89,4 +119,10 @@ async fn run_command(serial: &mut Serial, line: &[u8], boot: &str) -> Result<(),
         }
     }
     Ok(())
+}
+
+async fn reset() -> ! {
+    // Let the last reply reach the host before USB goes away.
+    Timer::after_millis(100).await;
+    SCB::sys_reset();
 }

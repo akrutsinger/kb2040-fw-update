@@ -22,3 +22,4 @@ cortex-m = "0.7.9"
 portable-atomic = { version = "1.15.0", features = ["critical-section"] }
 embassy-boot-rp = "0.10.0"
 embassy-sync = "0.8.0"
+embedded-storage = "0.3.2"

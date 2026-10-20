@@ -2,6 +2,7 @@
 #![no_main]
 
 mod console;
+mod update;
 
 use core::cell::RefCell;
 
@@ -113,7 +114,7 @@ async fn main(spawner: Spawner) {
     loop {
         serial.wait_connection().await;
         // Returns when the host goes away.
-        let _ = console::console(&mut serial, boot).await;
+        let _ = console::console(&mut serial, boot, &mut updater).await;
     }
 }
 
