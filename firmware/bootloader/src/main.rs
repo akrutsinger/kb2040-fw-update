@@ -10,6 +10,7 @@ use embassy_boot_rp::*;
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_time::Duration;
 
+/// Must match the app's `FLASH_SIZE`.
 const FLASH_SIZE: usize = 8 * 1024 * 1024;
 
 #[entry]
