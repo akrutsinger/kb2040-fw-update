@@ -17,13 +17,12 @@ SHA-256(REQUEST_DOMAIN || nonce || version). firmware/app/src/identity.rs descri
 import secrets
 import sys
 
+import board
 import serial
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
-
-import board
 
 # Must match CHALLENGE_DOMAIN and REQUEST_DOMAIN in identity.rs.
 DOMAIN = b"kb2040-fw-update/challenge/v1"
@@ -65,12 +64,17 @@ def main():
         signature = from_hex("sign", board.command(port, f"sign {nonce.hex()}"), 64)
         reply = board.command(port, f"request {request_nonce.hex()}").split()
         if len(reply) != 2:
-            sys.exit(f"request: expected '<version> <signature>', got {' '.join(reply)!r}")
+            sys.exit(
+                f"request: expected '<version> <signature>', got {' '.join(reply)!r}"
+            )
         version, request_signature = reply[0], from_hex("request", reply[1], 64)
 
     key = ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), point)
     verify(
-        key, signature, DOMAIN + nonce, "signature INVALID: the board doesn't hold this key"
+        key,
+        signature,
+        DOMAIN + nonce,
+        "signature INVALID: the board doesn't hold this key",
     )
     print(f"key    {point.hex()}")
     print(f"nonce  {nonce.hex()}")

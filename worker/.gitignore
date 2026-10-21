@@ -1,0 +1,7 @@
+node_modules/
+# wrangler dev's local KV and cache.
+.wrangler/
+# Local secrets (NONCE_KEY).
+.dev.vars
+# Made by `npm run check` (`wrangler types`).
+worker-configuration.d.ts

@@ -4,6 +4,7 @@ Scripts import it as `board` (Python puts the script's own directory on the impo
 pyserial in their own dependencies.
 """
 
+import hashlib
 import sys
 import time
 
@@ -30,3 +31,9 @@ def command(port, line):
     if not lines:
         sys.exit(f"{name}: empty reply")
     return lines[-1].strip()
+
+
+def device_id(identity_key):
+    """The update server's name for a board: the first 16 bytes of SHA-256(identity key), in hex.
+    `identity_key` is the SEC1 point `pubkey` prints, as bytes."""
+    return hashlib.sha256(identity_key).digest()[:16].hex()

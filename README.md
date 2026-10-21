@@ -12,9 +12,12 @@ Example for how to do encrypted firmware updates using the Adafruit KB2040 (RP20
 - `tools/sign.py`: signs app images with the update key
 - `tools/upload.py`: sends a signed app image to the board over USB serial (see [Update over USB](#update-over-usb))
 - `tools/challenge.py`: checks that the board holds its identity key and signs update requests (see [Identity key](#identity-key))
-- `tools/board.py`: console helpers that `upload.py` and `challenge.py` share (not a script itself)
+- `tools/enroll.py`: registers a board's keys with the update server (see [Update server](#update-server))
+- `tools/bridge.py`: carries a board's update request to the update server and back
+- `tools/board.py`: console helpers the scripts share (not a script itself)
 - `tools/tpmfactoryupd-openssl11.patch`: lets Infineon's TPM firmware tool build on a current Raspberry Pi OS (see [TPM 1.2 firmware](#tpm-12-firmware))
 - `keys/update.pub`: public half of the signing key (OpenSSH format), built into the app
+- `worker/`: the update server, a Cloudflare Worker (see [Update server](#update-server))
 
 ## Prerequisites
 
@@ -25,7 +28,8 @@ cargo install cargo-binutils && rustup component add llvm-tools   # cargo objcop
 ```
 
 [uv](https://docs.astral.sh/uv/) runs the scripts in `tools/` and fetches their dependencies
-(pyserial, cryptography).
+(pyserial, cryptography). [Node.js](https://nodejs.org/) with npm runs the update server locally
+(`worker/`).
 
 ### Signing key
 
@@ -352,7 +356,8 @@ uv run tools/challenge.py /dev/ttyACM0
 ```
 
 It verifies against the key the board itself reports, so it proves the board holds that key, not
-that it's the board you expect. Pinning known keys comes with the Worker (roadmap step 5).
+that it's the board you expect. The update server does pin each board's key, when the board is
+enrolled (see [Update server](#update-server)).
 
 `request <nonce>` makes an update request for the update server, which supplies the nonce. The
 board signs `SHA-256("kb2040-fw-update/update-request/v1" || nonce || version)` with the same key,
@@ -387,6 +392,61 @@ The driver (`firmware/tpm/`) follows the register interface and SPI protocol of 
 decoded by [`tpm2-protocol`](https://crates.io/crates/tpm2-protocol) (`no_std`, no allocation). It
 takes an `SpiBus` plus a CS# pin rather than an `SpiDevice`, because the TPM can stretch a transfer
 with wait states (see `tpm/src/interface/spi.rs`).
+
+## Update server
+
+`worker/` is the update server, a [Cloudflare Worker](https://developers.cloudflare.com/workers/) in
+TypeScript. Cloudflare runs Workers on its own network, close to whoever calls them, so there's no
+server to run. While developing, `wrangler dev` runs the same runtime locally, with a local copy of
+its storage (KV) in `worker/.wrangler/`. The board has no network, so `tools/bridge.py` carries its
+messages over USB serial.
+
+For now it checks that an update request comes from a registered board. Delivering encrypted
+updates comes next.
+
+Setup, once, from `worker/`:
+
+```sh
+npm install
+echo "NONCE_KEY=$(openssl rand -hex 32)" > .dev.vars   # local secret, gitignored
+```
+
+Then `npm run dev` (from `worker/`) serves on `http://localhost:8787`. With it running, from the
+repo root (close tio first):
+
+```sh
+uv run tools/enroll.py /dev/ttyACM0     # once per board
+uv run tools/bridge.py /dev/ttyACM0
+```
+
+```
+device   71ee3c8ba4aa108e651b4c50137feda4
+running  0.1.0
+latest   no release yet
+authorized
+```
+
+How a request works:
+
+1. `bridge.py` gets a nonce from the server (`POST /v1/challenge`).
+2. The board signs an update request for it (`request <nonce>`, see [Identity key](#identity-key)).
+3. `bridge.py` passes the request on (`POST /v1/update`). The server checks the nonce, looks up the
+   board, and verifies the signature with the identity key it registered for that board.
+
+- **Enrolling** (`enroll.py`) reads both public keys from the board and stores them in KV as
+  `device:<id>`. The id is the first 16 bytes of SHA-256(identity key), in hex. The server only
+  ever checks a request against that registered key, never a key that comes with the request.
+  Enrolling trusts whatever answers on the port, so do it with the board in front of you. Proving
+  that a key really lives in a TPM (EK certificates) is a stretch goal.
+- **Nonces** carry their own expiry and an HMAC made with `NONCE_KEY`
+  (`expiry || random || HMAC[..16]`), so the server checks them without storing anything. A nonce
+  is valid for 5 minutes, and can be used more than once until then. A replayed request only gets
+  the same answer for the same board, so that's fine for now. Single use would need state (a
+  Durable Object).
+- `npm run check` type-checks the Worker. It first generates the runtime types with
+  `wrangler types`.
+- npm 11 blocks workerd's install script by default and warns about it during `npm install`.
+  `wrangler dev` works without it.
 
 ## Board notes
 

@@ -1,0 +1,9 @@
+name = "kb2040-fw-update"
+main = "src/index.ts"
+compatibility_date = "2026-10-01"
+
+# Registered boards (`device:<id>`) and releases. `wrangler dev` keeps a local copy in .wrangler/,
+# so the id doesn't matter until the Worker is deployed.
+[[kv_namespaces]]
+binding = "KV"
+id = "local"
