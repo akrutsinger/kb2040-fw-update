@@ -8,14 +8,14 @@
 //!   It can't sign, and the identity key can't do ECDH (key separation).
 
 use sha2::{Digest, Sha256};
-use tpm::{KeyKind, PublicKey, Signature};
+use tpm::{KeyKind, Persistent, PublicKey, Signature};
 
 use crate::{Tpm, TpmError};
 
 /// Where the keys persist: the first owner handles after 0x81000001, which TCG reserves for the
 /// storage root key.
-const IDENTITY_HANDLE: u32 = 0x8100_0002;
-const DECRYPT_HANDLE: u32 = 0x8100_0003;
+const IDENTITY_HANDLE: Persistent = Persistent(0x8100_0002);
+const DECRYPT_HANDLE: Persistent = Persistent(0x8100_0003);
 
 /// Prefix of every signed challenge. It separates challenge signatures from anything else this key
 /// signs, so `sign` can't be used to forge those. Must match `DOMAIN` in `tools/challenge.py`.
@@ -40,7 +40,7 @@ pub async fn key(tpm: &mut Tpm, kind: KeyKind) -> Result<(PublicKey, bool), TpmE
         return Ok((key, false));
     }
     let (transient, key) = tpm.create_key(kind).await?;
-    let persisted = tpm.persist(transient, handle).await;
+    let persisted = tpm.persist(&transient, handle).await;
     // Flush the transient copy even if persisting failed: the TPM has only 3 object slots.
     let flushed = tpm.flush(transient).await;
     persisted?;

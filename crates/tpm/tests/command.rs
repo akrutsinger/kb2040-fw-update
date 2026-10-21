@@ -17,7 +17,7 @@ use p256::ecdsa::{Signature as EcdsaSignature, VerifyingKey};
 use p256::elliptic_curve::sec1::ToEncodedPoint;
 use tpm::registers::{ACCESS, DATA_FIFO, STS};
 use tpm::tpm2_protocol::data::TpmRcBase;
-use tpm::{Interface, KeyKind, PublicKey, Tpm};
+use tpm::{Interface, KeyKind, Persistent, PublicKey, Tpm};
 
 /// Small, so commands and responses take several bursts.
 const BURST: usize = 8;
@@ -149,7 +149,7 @@ async fn tpm_errors_come_back_as_response_codes() {
     // TPM_RC_FAILURE.
     let backend = |_: &[u8]| vec![0x80, 0x01, 0, 0, 0, 0x0A, 0, 0, 0x01, 0x01];
     let mut tpm = Tpm::new(FifoTpm::new(backend), NoopDelay);
-    let result = tpm.flush(0x8000_0000).await;
+    let result = tpm.sign(Persistent(0x8100_0002), &[0; 32]).await;
     assert!(
         matches!(result, Err(tpm::Error::Tpm(rc)) if rc.base() == TpmRcBase::Failure),
         "{result:?}"
@@ -212,7 +212,7 @@ fn exchange(stream: &mut UnixStream, command: &[u8]) -> Vec<u8> {
 #[tokio::test]
 #[ignore = "needs swtpm; run with --include-ignored"]
 async fn identity_key_flow_against_swtpm() {
-    const PERSISTENT: u32 = 0x8100_0002;
+    const PERSISTENT: Persistent = Persistent(0x8100_0002);
     let (_swtpm, mut stream) = Swtpm::start();
     let mut tpm = Tpm::new(FifoTpm::new(|c: &[u8]| exchange(&mut stream, c)), NoopDelay);
 
@@ -223,10 +223,10 @@ async fn identity_key_flow_against_swtpm() {
 
     let (transient, created) = tpm.create_key(KeyKind::Signing).await.unwrap();
     assert_eq!(
-        tpm.read_key(transient, KeyKind::Signing).await,
+        tpm.read_key(&transient, KeyKind::Signing).await,
         Ok(Some(created))
     );
-    tpm.persist(transient, PERSISTENT).await.unwrap();
+    tpm.persist(&transient, PERSISTENT).await.unwrap();
     tpm.flush(transient).await.unwrap();
 
     let persisted = tpm
@@ -266,10 +266,13 @@ async fn decrypt_key_agrees_with_p256_against_swtpm() {
     assert_ne!(key, signing_key);
     // Each kind only parses as itself, so neither is mistaken for the other.
     assert_eq!(
-        tpm.read_key(decrypt, KeyKind::Signing).await,
+        tpm.read_key(&decrypt, KeyKind::Signing).await,
         Err(tpm::Error::UnexpectedKey)
     );
-    assert_eq!(tpm.read_key(decrypt, KeyKind::Decrypt).await, Ok(Some(key)));
+    assert_eq!(
+        tpm.read_key(&decrypt, KeyKind::Decrypt).await,
+        Ok(Some(key))
+    );
 
     // What a sender does: ECDH between its own (here fixed) secret and the TPM's public key.
     let sender = p256::SecretKey::from_slice(&[0x42; 32]).unwrap();
@@ -280,13 +283,13 @@ async fn decrypt_key_agrees_with_p256_against_swtpm() {
         x: (*point.x().unwrap()).into(),
         y: (*point.y().unwrap()).into(),
     };
-    let shared = tpm.ecdh_zgen(decrypt, &sender_public).await.unwrap();
+    let shared = tpm.ecdh_zgen(&decrypt, &sender_public).await.unwrap();
     assert_eq!(shared[..], expected.raw_secret_bytes()[..]);
 
     // Key separation: the signing key can't do ECDH, the decryption key can't sign.
-    let result = tpm.ecdh_zgen(signing, &sender_public).await;
+    let result = tpm.ecdh_zgen(&signing, &sender_public).await;
     assert!(matches!(result, Err(tpm::Error::Tpm(_))), "{result:?}");
-    let result = tpm.sign(decrypt, &[0x5A; 32]).await;
+    let result = tpm.sign(&decrypt, &[0x5A; 32]).await;
     assert!(matches!(result, Err(tpm::Error::Tpm(_))), "{result:?}");
 
     // A point that isn't on the curve is refused (no invalid-curve attacks on the private key).
@@ -294,7 +297,7 @@ async fn decrypt_key_agrees_with_p256_against_swtpm() {
         x: [1; 32],
         y: [2; 32],
     };
-    let result = tpm.ecdh_zgen(decrypt, &off_curve).await;
+    let result = tpm.ecdh_zgen(&decrypt, &off_curve).await;
     assert!(
         matches!(result, Err(tpm::Error::Tpm(rc)) if rc.base() == TpmRcBase::EccPoint),
         "{result:?}"

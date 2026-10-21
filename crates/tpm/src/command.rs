@@ -31,6 +31,34 @@ const COMMAND_LEN: usize = 128;
 /// Big enough for every response here. CreatePrimary's is the largest, about 300 bytes.
 const RESPONSE_LEN: usize = 512;
 
+/// The handle of a key [`Tpm::create_key`] loaded. Not `Copy`: [`Tpm::flush`] takes it, so it
+/// can't be used after.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Transient(u32);
+
+/// A persistent handle, `0x81xx_xxxx`, where [`Tpm::persist`] keeps a key across power loss.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Persistent(pub u32);
+
+/// The handle of a loaded key, for the commands that use one: a [`Persistent`] handle, or a
+/// borrowed [`Transient`] one.
+pub trait Handle {
+    /// The TPM's handle value.
+    fn raw(self) -> u32;
+}
+
+impl Handle for &Transient {
+    fn raw(self) -> u32 {
+        self.0
+    }
+}
+
+impl Handle for Persistent {
+    fn raw(self) -> u32 {
+        self.0
+    }
+}
+
 /// A P-256 public key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PublicKey {
@@ -85,7 +113,10 @@ impl<I: Interface, D: DelayNs> Tpm<I, D> {
     ///
     /// Primary keys are derived from the hierarchy's seed, so the same template gives the same key
     /// every time, until the TPM is cleared.
-    pub async fn create_key(&mut self, kind: KeyKind) -> Result<(u32, PublicKey), Error<I::Error>> {
+    pub async fn create_key(
+        &mut self,
+        kind: KeyKind,
+    ) -> Result<(Transient, PublicKey), Error<I::Error>> {
         let command = TpmCreatePrimaryCommand {
             handles: [owner()],
             in_public: Tpm2bPublic {
@@ -96,15 +127,22 @@ impl<I: Interface, D: DelayNs> Tpm<I, D> {
         };
         let response: TpmCreatePrimaryResponse = self.run(&command, &[password()]).await?;
         let [handle] = response.handles;
-        Ok((handle.value(), parse_key(response.out_public.inner, kind)?))
+        Ok((
+            Transient(handle.value()),
+            parse_key(response.out_public.inner, kind)?,
+        ))
     }
 
-    /// TPM2_EvictControl: copies transient `object` to `persistent`, where it survives power
-    /// loss. The transient copy stays loaded, so [`flush`](Self::flush) it.
-    pub async fn persist(&mut self, object: u32, persistent: u32) -> Result<(), Error<I::Error>> {
+    /// TPM2_EvictControl: copies `object` to `persistent`, where it survives power loss. The
+    /// transient copy stays loaded, so [`flush`](Self::flush) it.
+    pub async fn persist(
+        &mut self,
+        object: &Transient,
+        persistent: Persistent,
+    ) -> Result<(), Error<I::Error>> {
         let command = TpmEvictControlCommand {
-            handles: [owner(), TpmHandle::new(object)],
-            persistent_handle: TpmHandle::new(persistent),
+            handles: [owner(), TpmHandle::new(object.0)],
+            persistent_handle: TpmHandle::new(persistent.0),
         };
         self.run::<_, TpmEvictControlResponse>(&command, &[password()])
             .await?;
@@ -112,10 +150,10 @@ impl<I: Interface, D: DelayNs> Tpm<I, D> {
     }
 
     /// TPM2_FlushContext: unloads a transient object.
-    pub async fn flush(&mut self, handle: u32) -> Result<(), Error<I::Error>> {
+    pub async fn flush(&mut self, object: Transient) -> Result<(), Error<I::Error>> {
         let command = TpmFlushContextCommand {
             handles: [],
-            flush_handle: TpmHandle::new(handle),
+            flush_handle: TpmHandle::new(object.0),
         };
         self.run::<_, TpmFlushContextResponse>(&command, &[])
             .await?;
@@ -125,11 +163,11 @@ impl<I: Interface, D: DelayNs> Tpm<I, D> {
     /// TPM2_Sign: signs `digest`, a SHA-256 hash, with `key`, a [`KeyKind::Signing`] key.
     pub async fn sign(
         &mut self,
-        key: u32,
+        key: impl Handle,
         digest: &[u8; 32],
     ) -> Result<Signature, Error<I::Error>> {
         let command = TpmSignCommand {
-            handles: [TpmHandle::new(key)],
+            handles: [TpmHandle::new(key.raw())],
             digest: Tpm2bDigest::try_from(&digest[..]).map_err(Error::Protocol)?,
             // NULL: use the key's own scheme, ECDSA-SHA256.
             in_scheme: TpmtSigScheme::default(),
@@ -160,11 +198,11 @@ impl<I: Interface, D: DelayNs> Tpm<I, D> {
     /// The TPM refuses a point that isn't on the curve, with `TPM_RC_ECC_POINT`.
     pub async fn ecdh_zgen(
         &mut self,
-        key: u32,
+        key: impl Handle,
         point: &PublicKey,
     ) -> Result<[u8; 32], Error<I::Error>> {
         let command = TpmEcdhZGenCommand {
-            handles: [TpmHandle::new(key)],
+            handles: [TpmHandle::new(key.raw())],
             in_point: Tpm2bEccPoint {
                 inner: TpmsEccPoint {
                     x: Tpm2bEccParameter::try_from(&point.x[..]).map_err(Error::Protocol)?,
@@ -182,11 +220,11 @@ impl<I: Interface, D: DelayNs> Tpm<I, D> {
     /// different template, so a stray key (or one of the other kind) is never mistaken for ours.
     pub async fn read_key(
         &mut self,
-        handle: u32,
+        handle: impl Handle,
         kind: KeyKind,
     ) -> Result<Option<PublicKey>, Error<I::Error>> {
         let command = TpmReadPublicCommand {
-            handles: [TpmHandle::new(handle)],
+            handles: [TpmHandle::new(handle.raw())],
         };
         match self.run::<_, TpmReadPublicResponse>(&command, &[]).await {
             Ok(response) => parse_key(response.out_public.inner, kind).map(Some),

@@ -19,7 +19,7 @@ pub mod error;
 pub mod interface;
 pub mod registers;
 
-pub use command::{KeyKind, PublicKey, Signature};
+pub use command::{Handle, KeyKind, Persistent, PublicKey, Signature, Transient};
 pub use device::{Id, Tpm};
 pub use error::Error;
 pub use interface::{Interface, SpiInterface};
