@@ -11,6 +11,7 @@ use embassy_usb::class::cdc_acm::CdcAcmClass;
 use embassy_usb::driver::EndpointError;
 use embedded_storage::nor_flash::NorFlash;
 use heapless::String;
+use tpm::KeyKind;
 
 use crate::{Tpm, update};
 
@@ -123,7 +124,7 @@ async fn run_command<DFU: NorFlash, STATE: NorFlash>(
         b"" => {}
         b"help" => reply!(
             out,
-            "commands: help, version, status, tpm, pubkey, sign, reboot, update\r\n"
+            "commands: help, version, status, tpm, pubkey [decrypt], sign, reboot, update\r\n"
         ),
         b"version" => reply!(out, "{}\r\n", env!("CARGO_PKG_VERSION")),
         b"status" => reply!(
@@ -133,7 +134,8 @@ async fn run_command<DFU: NorFlash, STATE: NorFlash>(
             ctx.boot
         ),
         b"tpm" => tpm_commands::info(&mut out, &mut ctx.tpm).await,
-        b"pubkey" => tpm_commands::pubkey(&mut out, &mut ctx.tpm).await,
+        b"pubkey" => tpm_commands::pubkey(&mut out, &mut ctx.tpm, KeyKind::Signing).await,
+        b"pubkey decrypt" => tpm_commands::pubkey(&mut out, &mut ctx.tpm, KeyKind::Decrypt).await,
         cmd if cmd.starts_with(b"sign ") => {
             tpm_commands::sign(&mut out, &mut ctx.tpm, &cmd[5..]).await
         }

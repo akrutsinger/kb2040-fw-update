@@ -1,4 +1,6 @@
-//! The TPM commands: `tpm`, `pubkey` and `sign`.
+//! The TPM commands: `tpm`, `pubkey [decrypt]` and `sign`.
+
+use tpm::KeyKind;
 
 use super::{Out, parse_hex};
 use crate::{Tpm, identity};
@@ -38,12 +40,17 @@ pub(super) async fn info(out: &mut Out, tpm: &mut Tpm) {
     }
 }
 
-/// Prints the identity key as a SEC1 uncompressed point in hex, creating it on first use.
-pub(super) async fn pubkey(out: &mut Out, tpm: &mut Tpm) {
-    match identity::public_key(tpm).await {
+/// Prints the identity key (`pubkey`) or the decryption key (`pubkey decrypt`) as a SEC1
+/// uncompressed point in hex, creating it on first use.
+pub(super) async fn pubkey(out: &mut Out, tpm: &mut Tpm, kind: KeyKind) {
+    match identity::key(tpm, kind).await {
         Ok((key, created)) => {
             if created {
-                reply!(out, "created identity key\r\n");
+                let name = match kind {
+                    KeyKind::Signing => "identity",
+                    KeyKind::Decrypt => "decryption",
+                };
+                reply!(out, "created {name} key\r\n");
             }
             out.hex(&key.to_sec1());
             reply!(out, "\r\n");

@@ -72,8 +72,8 @@ host target, since `.cargo/config.toml` defaults to the board:
 cargo test -p tpm --target x86_64-unknown-linux-gnu
 ```
 
-One more test runs the TPM2 commands against [swtpm](https://github.com/stefanberger/swtpm), a
-software TPM 2.0 (`dnf install swtpm`). It's skipped by default:
+Two more tests run the TPM2 commands against [swtpm](https://github.com/stefanberger/swtpm), a
+software TPM 2.0 (`dnf install swtpm`). They're skipped by default:
 
 ```sh
 cargo test -p tpm --target x86_64-unknown-linux-gnu -- --include-ignored
@@ -336,7 +336,7 @@ created identity key
   persistent at handle `0x81000002`. After that, `pubkey` just reads it back, across resets and
   power loss. Clearing the TPM deletes it; a new one would then be different.
 - It's a signing key only, unrestricted so the TPM signs any digest the firmware gives it. Key
-  agreement for encrypted updates will get its own key.
+  agreement for encrypted updates uses its own key (see [Decryption key](#decryption-key)).
 - Creating it needs the owner hierarchy's password to be empty, which it is on a fresh TPM. If the
   TPM was used elsewhere and has an owner password, `pubkey` fails with an authorization error
   such as `ERR TPM error [TPM_RC_BAD_AUTH, session[1]]`.
@@ -353,6 +353,19 @@ uv run tools/challenge.py /dev/ttyACM0
 
 It verifies against the key the board itself reports, so it proves the board holds that key, not
 that it's the board you expect. Pinning known keys comes with the Worker (roadmap step 5).
+
+### Decryption key
+
+`pubkey decrypt` prints the board's second key, in the same format. It's made the same way, on the
+first `pubkey decrypt`, and persists at handle `0x81000003`.
+
+- It does key agreement (ECDH) only, and can't sign. The identity key in turn can't do ECDH. Each
+  key does one job, so a mistake in how one is used can't weaken the other.
+- Encrypted updates will use it. The update server encrypts each update's AES key to this key
+  (HPKE). The board gets that key back with TPM2_ECDH_ZGen, which multiplies the server's one-time
+  public key by the private key inside the TPM.
+- There's deliberately no console command that runs ECDH_ZGen on its own: anyone at the USB port
+  could then use the board to decrypt update keys. It only runs inside an encrypted update.
 
 The driver (`firmware/tpm/`) follows the register interface and SPI protocol of the TCG
 "PC Client Platform TPM Profile (PTP) Specification". TPM2 commands and responses are encoded and

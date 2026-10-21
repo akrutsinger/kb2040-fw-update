@@ -9,23 +9,24 @@ use embedded_hal_async::delay::DelayNs;
 use tpm2_protocol::TpmWriter;
 use tpm2_protocol::basic::TpmHandle;
 use tpm2_protocol::data::{
-    Tpm2bDigest, Tpm2bPublic, TpmAlgId, TpmEccCurve, TpmRc, TpmRcBase, TpmRh, TpmSt, TpmSu,
-    TpmaObject, TpmsAuthCommand, TpmsEccParms, TpmsEccPoint, TpmsSchemeHash, TpmtEccScheme,
-    TpmtKdfScheme, TpmtPublic, TpmtSigScheme, TpmtSymDefObject, TpmtTkHashcheck, TpmuAsymScheme,
-    TpmuPublicId, TpmuPublicParms, TpmuSignature,
+    Tpm2bDigest, Tpm2bEccParameter, Tpm2bEccPoint, Tpm2bPublic, TpmAlgId, TpmEccCurve, TpmRc,
+    TpmRcBase, TpmRh, TpmSt, TpmSu, TpmaObject, TpmsAuthCommand, TpmsEccParms, TpmsEccPoint,
+    TpmsSchemeHash, TpmtEccScheme, TpmtKdfScheme, TpmtPublic, TpmtSigScheme, TpmtSymDefObject,
+    TpmtTkHashcheck, TpmuAsymScheme, TpmuPublicId, TpmuPublicParms, TpmuSignature,
 };
 use tpm2_protocol::frame::{
-    TpmCreatePrimaryCommand, TpmCreatePrimaryResponse, TpmEvictControlCommand,
-    TpmEvictControlResponse, TpmFlushContextCommand, TpmFlushContextResponse, TpmFrame,
-    TpmReadPublicCommand, TpmReadPublicResponse, TpmResponse, TpmSignCommand, TpmSignResponse,
-    TpmStartupCommand, TpmStartupResponse, TpmUnmarshalBody, tpm_marshal_command,
+    TpmCreatePrimaryCommand, TpmCreatePrimaryResponse, TpmEcdhZGenCommand, TpmEcdhZGenResponse,
+    TpmEvictControlCommand, TpmEvictControlResponse, TpmFlushContextCommand,
+    TpmFlushContextResponse, TpmFrame, TpmReadPublicCommand, TpmReadPublicResponse, TpmResponse,
+    TpmSignCommand, TpmSignResponse, TpmStartupCommand, TpmStartupResponse, TpmUnmarshalBody,
+    tpm_marshal_command,
 };
 
 use crate::device::Tpm;
 use crate::error::Error;
 use crate::interface::Interface;
 
-/// Big enough for every command sent here. CreatePrimary's is the largest, 65 bytes.
+/// Big enough for every command sent here. ECDH_ZGen's is the largest, 97 bytes.
 const COMMAND_LEN: usize = 128;
 /// Big enough for every response here. CreatePrimary's is the largest, about 300 bytes.
 const RESPONSE_LEN: usize = 512;
@@ -54,6 +55,16 @@ pub struct Signature {
     pub s: [u8; 32],
 }
 
+/// The kinds of key this driver makes: P-256 keys in the owner hierarchy that differ only in what
+/// the TPM lets them do. Each kind has its own template, so the two are different keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyKind {
+    /// Signs with ECDSA-SHA256, see [`Tpm::sign`].
+    Signing,
+    /// Does ECDH key agreement, see [`Tpm::ecdh_zgen`]. It can't sign.
+    Decrypt,
+}
+
 impl<I: Interface, D: DelayNs> Tpm<I, D> {
     /// TPM2_Startup(CLEAR). Succeeds if the TPM is already started, which is normal here: it
     /// keeps power when only the MCU resets.
@@ -69,26 +80,23 @@ impl<I: Interface, D: DelayNs> Tpm<I, D> {
         }
     }
 
-    /// TPM2_CreatePrimary: a P-256 ECDSA-SHA256 signing key in the owner hierarchy. Returns its
-    /// transient handle and public key.
+    /// TPM2_CreatePrimary: a P-256 key of `kind` in the owner hierarchy. Returns its transient
+    /// handle and public key.
     ///
     /// Primary keys are derived from the hierarchy's seed, so the same template gives the same key
     /// every time, until the TPM is cleared.
-    pub async fn create_signing_key(&mut self) -> Result<(u32, PublicKey), Error<I::Error>> {
+    pub async fn create_key(&mut self, kind: KeyKind) -> Result<(u32, PublicKey), Error<I::Error>> {
         let command = TpmCreatePrimaryCommand {
             handles: [owner()],
             in_public: Tpm2bPublic {
-                inner: signing_template(),
+                inner: template(kind),
             },
             // No auth value or data for the key, no outside info, no PCRs.
             ..Default::default()
         };
         let response: TpmCreatePrimaryResponse = self.run(&command, &[password()]).await?;
         let [handle] = response.handles;
-        Ok((
-            handle.value(),
-            parse_signing_key(response.out_public.inner)?,
-        ))
+        Ok((handle.value(), parse_key(response.out_public.inner, kind)?))
     }
 
     /// TPM2_EvictControl: copies transient `object` to `persistent`, where it survives power
@@ -114,8 +122,7 @@ impl<I: Interface, D: DelayNs> Tpm<I, D> {
         Ok(())
     }
 
-    /// TPM2_Sign: signs `digest`, a SHA-256 hash, with `key`, a key made by
-    /// [`create_signing_key`](Self::create_signing_key).
+    /// TPM2_Sign: signs `digest`, a SHA-256 hash, with `key`, a [`KeyKind::Signing`] key.
     pub async fn sign(
         &mut self,
         key: u32,
@@ -146,19 +153,43 @@ impl<I: Interface, D: DelayNs> Tpm<I, D> {
         }
     }
 
-    /// TPM2_ReadPublic on a key made by [`create_signing_key`](Self::create_signing_key).
+    /// TPM2_ECDH_ZGen: multiplies `point` by the private half of `key`, a [`KeyKind::Decrypt`]
+    /// key, and returns the result's x-coordinate. That's the ECDH shared secret, the form HPKE
+    /// and ECIES use. The private key stays in the TPM.
+    ///
+    /// The TPM refuses a point that isn't on the curve, with `TPM_RC_ECC_POINT`.
+    pub async fn ecdh_zgen(
+        &mut self,
+        key: u32,
+        point: &PublicKey,
+    ) -> Result<[u8; 32], Error<I::Error>> {
+        let command = TpmEcdhZGenCommand {
+            handles: [TpmHandle::new(key)],
+            in_point: Tpm2bEccPoint {
+                inner: TpmsEccPoint {
+                    x: Tpm2bEccParameter::try_from(&point.x[..]).map_err(Error::Protocol)?,
+                    y: Tpm2bEccParameter::try_from(&point.y[..]).map_err(Error::Protocol)?,
+                },
+            },
+        };
+        let response: TpmEcdhZGenResponse = self.run(&command, &[password()]).await?;
+        scalar(&response.out_point.inner.x).ok_or(Error::UnexpectedKey)
+    }
+
+    /// TPM2_ReadPublic on a key of `kind`.
     ///
     /// `None` if `handle` is empty. [`Error::UnexpectedKey`] if it holds a key made from a
-    /// different template, so a stray key is never mistaken for ours.
-    pub async fn read_signing_key(
+    /// different template, so a stray key (or one of the other kind) is never mistaken for ours.
+    pub async fn read_key(
         &mut self,
         handle: u32,
+        kind: KeyKind,
     ) -> Result<Option<PublicKey>, Error<I::Error>> {
         let command = TpmReadPublicCommand {
             handles: [TpmHandle::new(handle)],
         };
         match self.run::<_, TpmReadPublicResponse>(&command, &[]).await {
-            Ok(response) => parse_signing_key(response.out_public.inner).map(Some),
+            Ok(response) => parse_key(response.out_public.inner, kind).map(Some),
             Err(Error::Tpm(rc)) if rc.base() == TpmRcBase::Handle => Ok(None),
             Err(e) => Err(e),
         }
@@ -218,18 +249,31 @@ fn password() -> TpmsAuthCommand {
     }
 }
 
-/// The signing key's public area, with `unique` empty for the TPM to fill in.
-fn signing_template() -> TpmtPublic {
+/// The public area of a `kind` key, with `unique` empty for the TPM to fill in.
+fn template(kind: KeyKind) -> TpmtPublic {
+    let (usage, scheme) = match kind {
+        // Unrestricted, so it signs any digest.
+        KeyKind::Signing => (
+            TpmaObject::SIGN_ENCRYPT,
+            TpmtEccScheme {
+                scheme: TpmAlgId::Ecdsa,
+                details: TpmuAsymScheme::Hash(TpmsSchemeHash {
+                    hash_alg: TpmAlgId::Sha256,
+                }),
+            },
+        ),
+        // Unrestricted, so ECDH_ZGen takes any point. NULL scheme: ZGen doesn't use one.
+        KeyKind::Decrypt => (TpmaObject::DECRYPT, TpmtEccScheme::default()),
+    };
     TpmtPublic {
         object_type: TpmAlgId::Ecc,
         name_alg: TpmAlgId::Sha256,
-        // Unrestricted, so it signs any digest.
         object_attributes: TpmaObject::FIXED_TPM
             | TpmaObject::FIXED_PARENT
             | TpmaObject::SENSITIVE_DATA_ORIGIN
             | TpmaObject::USER_WITH_AUTH
             | TpmaObject::NO_DA
-            | TpmaObject::SIGN_ENCRYPT,
+            | usage,
         auth_policy: Default::default(),
         parameters: TpmuPublicParms::Ecc(TpmsEccParms {
             // Not a storage key, so no symmetric algorithm.
@@ -237,12 +281,7 @@ fn signing_template() -> TpmtPublic {
                 algorithm: TpmAlgId::Null,
                 ..Default::default()
             },
-            scheme: TpmtEccScheme {
-                scheme: TpmAlgId::Ecdsa,
-                details: TpmuAsymScheme::Hash(TpmsSchemeHash {
-                    hash_alg: TpmAlgId::Sha256,
-                }),
-            },
+            scheme,
             curve_id: TpmEccCurve::NistP256,
             kdf: TpmtKdfScheme::default(),
         }),
@@ -250,9 +289,9 @@ fn signing_template() -> TpmtPublic {
     }
 }
 
-/// The key from a public area, which must match [`signing_template`] apart from `unique`.
-fn parse_signing_key<E>(mut public: TpmtPublic) -> Result<PublicKey, Error<E>> {
-    let template = signing_template();
+/// The key from a public area, which must match `kind`'s [`template`] apart from `unique`.
+fn parse_key<E>(mut public: TpmtPublic, kind: KeyKind) -> Result<PublicKey, Error<E>> {
+    let template = template(kind);
     let unique = core::mem::replace(&mut public.unique, template.unique.clone());
     if public != template {
         return Err(Error::UnexpectedKey);
