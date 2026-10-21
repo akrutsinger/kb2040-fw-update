@@ -18,6 +18,8 @@ import time
 
 import serial
 
+import board
+
 # One flash erase sector, must match BLOCK_SIZE in update.rs.
 BLOCK_SIZE = 4096
 # Seconds to wait for each reply from the device.
@@ -52,10 +54,7 @@ def main():
     image, signature = data[:-SIGNATURE_SIZE], data[-SIGNATURE_SIZE:]
 
     with serial.Serial(port_name, timeout=TIMEOUT) as port:
-        # Get a fresh prompt, then start the update.
-        port.write(b"\r")
-        time.sleep(0.1)
-        port.reset_input_buffer()
+        board.fresh_prompt(port)
         port.write(b"update\r")
 
         # Skip the echoed command until the device is ready.

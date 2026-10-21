@@ -12,6 +12,7 @@ Example for how to do encrypted firmware updates using the Adafruit KB2040 (RP20
 - `tools/sign.py`: signs app images with the update key
 - `tools/upload.py`: sends a signed app image to the board over USB serial (see [Update over USB](#update-over-usb))
 - `tools/challenge.py`: checks that the board holds its identity key (see [Identity key](#identity-key))
+- `tools/board.py`: console helpers that `upload.py` and `challenge.py` share (not a script itself)
 - `tools/tpmfactoryupd-openssl11.patch`: lets Infineon's TPM firmware tool build on a current Raspberry Pi OS (see [TPM 1.2 firmware](#tpm-12-firmware))
 - `keys/update.pub`: public half of the signing key (OpenSSH format), built into the app
 

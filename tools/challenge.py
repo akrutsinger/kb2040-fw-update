@@ -14,7 +14,6 @@ the format.
 
 import secrets
 import sys
-import time
 
 import serial
 from cryptography.exceptions import InvalidSignature
@@ -22,28 +21,13 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
 
+import board
+
 # Must match CHALLENGE_DOMAIN in identity.rs.
 DOMAIN = b"kb2040-fw-update/challenge/v1"
 NONCE_LEN = 32
 # Seconds to wait for a reply. The first `pubkey` creates the key, which takes a moment.
 TIMEOUT = 10
-
-
-def command(port, line):
-    """Runs a console command. Returns the last line of its reply, or exits on ERR."""
-    name = line.split()[0]
-    port.write(line.encode() + b"\r")
-    reply = port.read_until(b"> ")
-    if not reply.endswith(b"> "):
-        sys.exit(f"{name}: no reply; is another program (tio?) holding the port?")
-    # Drop the echoed command line and the prompt.
-    lines = reply[:-2].decode(errors="replace").splitlines()[1:]
-    for text in lines:
-        if text.startswith("ERR"):
-            sys.exit(f"{name}: {text}")
-    if not lines:
-        sys.exit(f"{name}: empty reply")
-    return lines[-1].strip()
 
 
 def from_hex(name, text, length):
@@ -62,12 +46,9 @@ def main():
     nonce = secrets.token_bytes(NONCE_LEN)
 
     with serial.Serial(sys.argv[1], timeout=TIMEOUT) as port:
-        # Get a fresh prompt.
-        port.write(b"\r")
-        time.sleep(0.1)
-        port.reset_input_buffer()
-        point = from_hex("pubkey", command(port, "pubkey"), 65)
-        signature = from_hex("sign", command(port, f"sign {nonce.hex()}"), 64)
+        board.fresh_prompt(port)
+        point = from_hex("pubkey", board.command(port, "pubkey"), 65)
+        signature = from_hex("sign", board.command(port, f"sign {nonce.hex()}"), 64)
 
     key = ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), point)
     r = int.from_bytes(signature[:32], "big")
