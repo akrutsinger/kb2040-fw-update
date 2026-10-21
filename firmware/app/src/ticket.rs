@@ -55,6 +55,7 @@ pub async fn open(
     let [0x04, point @ ..] = enc else {
         return Err(Error::BadEnc);
     };
+    let point: &[u8] = point;
     let (x, y) = point.split_at(32);
     let point = PublicKey {
         x: x.try_into().unwrap(),

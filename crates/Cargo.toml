@@ -1,0 +1,11 @@
+# Platform-agnostic libraries the firmware uses. Kept out of the firmware workspace so they build
+# and test on the host: firmware/.cargo/config.toml makes every crate under it build for the board,
+# which has no `std` or test harness.
+[workspace]
+resolver = "3"
+members = ["tpm", "hpke"]
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+publish = false

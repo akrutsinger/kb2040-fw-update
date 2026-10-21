@@ -8,7 +8,8 @@ Example for how to do encrypted firmware updates using the Adafruit KB2040 (RP20
   - `memory-layout.x`: flash partitions shared by both crates (see [Memory layout](#memory-layout))
   - `app/`: the application, runs from the ACTIVE partition
   - `bootloader/`: [embassy-boot-rp](https://docs.embassy.dev/embassy-boot-rp/0.10.0/default/index.html) bootloader, owns boot2 and jumps to ACTIVE
-  - `tpm/`: async driver for the TPM (see [TPM](#tpm)), a platform-agnostic library the app uses
+- `crates/`: cargo workspace for the platform-agnostic libraries the app uses, built and tested on the host
+  - `tpm/`: async driver for the TPM (see [TPM](#tpm))
   - `hpke/`: opens HPKE messages (RFC 9180), for the app's update tickets (see [Releases](#releases))
 - `tools/sign.py`: signs app images with the update key
 - `tools/upload.py`: sends a signed app image to the board over USB serial (see [Update over USB](#update-over-usb))
@@ -71,25 +72,21 @@ cargo clippy
 - Run them from inside `firmware/`. With `--manifest-path` from the repo root, cargo doesn't
   see `.cargo/config.toml` and builds for the host (`unwinding panics are not supported without std`).
 
-The `tpm` driver has host tests (SPI framing and register logic, against mocks). They need the
-host target, since `.cargo/config.toml` defaults to the board:
+## Test
+
+The libraries in `crates/` have host tests. From `crates/`:
 
 ```sh
-cargo test -p tpm --target x86_64-unknown-linux-gnu
+cargo test
 ```
 
-Two more tests run the TPM2 commands against [swtpm](https://github.com/stefanberger/swtpm), a
-software TPM 2.0 (`dnf install swtpm`). They're skipped by default:
+- `tpm`: SPI framing and register logic, against mocks. Two more tests run the TPM2 commands
+  against [swtpm](https://github.com/stefanberger/swtpm), a software TPM 2.0 (`dnf install swtpm`).
+  They're skipped by default; run them with `cargo test -p tpm -- --include-ignored`.
+- `hpke`: RFC 9180's test vector for its cipher suite.
 
-```sh
-cargo test -p tpm --target x86_64-unknown-linux-gnu -- --include-ignored
-```
-
-The `hpke` crate is tested against RFC 9180's test vector for its cipher suite:
-
-```sh
-cargo test -p hpke --target x86_64-unknown-linux-gnu
-```
+They live outside `firmware/` because `firmware/.cargo/config.toml` builds everything under it for
+the board, which has no `std` or test harness.
 
 ## Flash (UF2)
 
@@ -396,11 +393,11 @@ first `pubkey decrypt`, and persists at handle `0x81000003`.
 - There's deliberately no console command that runs ECDH_ZGen on its own: anyone at the USB port
   could then use the board to decrypt update keys. It only runs inside an encrypted update.
 
-The driver (`firmware/tpm/`) follows the register interface and SPI protocol of the TCG
+The driver (`crates/tpm/`) follows the register interface and SPI protocol of the TCG
 "PC Client Platform TPM Profile (PTP) Specification". TPM2 commands and responses are encoded and
 decoded by [`tpm2-protocol`](https://crates.io/crates/tpm2-protocol) (`no_std`, no allocation). It
 takes an `SpiBus` plus a CS# pin rather than an `SpiDevice`, because the TPM can stretch a transfer
-with wait states (see `tpm/src/interface/spi.rs`).
+with wait states (see `crates/tpm/src/interface/spi.rs`).
 
 ## Update server
 

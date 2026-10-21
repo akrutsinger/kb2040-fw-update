@@ -25,9 +25,9 @@ embassy-boot = { version = "0.7.0", features = ["ed25519-salty"] }
 embassy-sync = "0.8.0"
 embedded-storage = "0.3.2"
 heapless = "0.9.3"
-tpm = { path = "../tpm" }
+tpm = { path = "../../crates/tpm" }
 sha2 = { version = "0.11.1", default-features = false }
-hpke = { path = "../hpke" }
+hpke = { path = "../../crates/hpke" }
 aes = "0.9.3"
 ctr = "0.10.1"
 

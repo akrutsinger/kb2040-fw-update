@@ -10,6 +10,5 @@ aes-gcm = { version = "0.11", default-features = false, features = ["aes"] }
 hkdf = "0.13"
 sha2 = { version = "0.11", default-features = false }
 
-# Host-only: run with `cargo test -p hpke --target x86_64-unknown-linux-gnu` (see README).
 [dev-dependencies]
 p256 = { version = "0.13", default-features = false, features = ["ecdh"] }
