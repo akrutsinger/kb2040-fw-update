@@ -9,6 +9,7 @@ Example for how to do encrypted firmware updates using the Adafruit KB2040 (RP20
   - `app/`: the application, runs from the ACTIVE partition
   - `bootloader/`: [embassy-boot-rp](https://docs.embassy.dev/embassy-boot-rp/0.10.0/default/index.html) bootloader, owns boot2 and jumps to ACTIVE
   - `tpm/`: async driver for the TPM (see [TPM](#tpm)), a platform-agnostic library the app uses
+  - `hpke/`: opens HPKE messages (RFC 9180), for the app's update tickets (see [Releases](#releases))
 - `tools/sign.py`: signs app images with the update key
 - `tools/upload.py`: sends a signed app image to the board over USB serial (see [Update over USB](#update-over-usb))
 - `tools/challenge.py`: checks that the board holds its identity key and signs update requests (see [Identity key](#identity-key))
@@ -84,6 +85,12 @@ software TPM 2.0 (`dnf install swtpm`). They're skipped by default:
 cargo test -p tpm --target x86_64-unknown-linux-gnu -- --include-ignored
 ```
 
+The `hpke` crate is tested against RFC 9180's test vector for its cipher suite:
+
+```sh
+cargo test -p hpke --target x86_64-unknown-linux-gnu
+```
+
 ## Flash (UF2)
 
 1. Put the board in BOOTSEL: hold **BOOT** and tap **RESET** (or plug in while holding BOOT).
@@ -114,7 +121,8 @@ flash, faults and resets in a loop. That's harmless; BOOTSEL still works.
 ## Update over USB
 
 Once the bootloader and an app are on the board, new app images can go over the USB serial
-console instead of BOOTSEL.
+console instead of BOOTSEL. This sends the image unencrypted. For encrypted releases through the
+update server, see [Encrypted updates, step by step](#encrypted-updates-step-by-step).
 
 1. Bump `version` in `firmware/app/Cargo.toml` (and `LED_COLOR` in `main.rs` to see the change).
 2. From `firmware/`, build a raw image:
@@ -382,9 +390,9 @@ first `pubkey decrypt`, and persists at handle `0x81000003`.
 
 - It does key agreement (ECDH) only, and can't sign. The identity key in turn can't do ECDH. Each
   key does one job, so a mistake in how one is used can't weaken the other.
-- Encrypted updates will use it. The update server encrypts each update's AES key to this key
-  (HPKE). The board gets that key back with TPM2_ECDH_ZGen, which multiplies the server's one-time
-  public key by the private key inside the TPM.
+- Encrypted updates use it. The update server encrypts each update's AES key to this key (HPKE).
+  The board gets that key back with TPM2_ECDH_ZGen, which multiplies the server's one-time public
+  key by the private key inside the TPM.
 - There's deliberately no console command that runs ECDH_ZGen on its own: anyone at the USB port
   could then use the board to decrypt update keys. It only runs inside an encrypted update.
 
@@ -403,30 +411,89 @@ its storage (KV for records, R2 for images) in `worker/.wrangler/`. The board ha
 `tools/bridge.py` carries its messages over USB serial.
 
 It checks that an update request comes from a registered board, and offers that board a newer
-release, encrypted so that only the board can read it. Installing it on the board comes next.
+release, encrypted so that only the board can read it, which `bridge.py` then installs.
 
-Setup, once, from `worker/`:
+### Encrypted updates, step by step
 
-```sh
-npm install
-echo "NONCE_KEY=$(openssl rand -hex 32)" > .dev.vars     # local secrets, gitignored
-echo "RELEASE_KEK=$(openssl rand -hex 32)" >> .dev.vars
-```
+Steps 1 to 4 are once only; steps 5 to 9 are for each new release. Run the commands from the repo
+root unless a step says otherwise. Close tio before any step that talks to the board (3, 4, 9):
+two programs on one port split the data between them.
 
-Then `npm run dev` (from `worker/`) serves on `http://localhost:8787`. With it running, from the
-repo root (close tio first):
+**Once:**
 
-```sh
-uv run tools/enroll.py /dev/ttyACM0     # once per board
-uv run tools/bridge.py /dev/ttyACM0
-```
+1. **Install the server's dependencies and make its secrets.** From `worker/`:
 
-```
-device   71ee3c8ba4aa108e651b4c50137feda4
-running  0.1.0
-latest   no release yet
-authorized
-```
+   ```sh
+   npm install
+   echo "NONCE_KEY=$(openssl rand -hex 32)" > .dev.vars     # local secrets, gitignored
+   echo "RELEASE_KEK=$(openssl rand -hex 32)" >> .dev.vars
+   ```
+
+2. **Start the server.** From `worker/`, in a terminal of its own, and leave it running for the
+   other steps. It serves on `http://localhost:8787`, and keeps its data in `worker/.wrangler/`
+   across restarts.
+
+   ```sh
+   npm run dev
+   ```
+
+3. **Put firmware on the board that knows `update encrypted`,** the old way: BOOTSEL and
+   `cargo run --release -p app` from `firmware/` (see [Flash (UF2)](#flash-uf2)), or a signed
+   image with `upload.py` (see [Update over USB](#update-over-usb)). After this, new firmware can
+   come encrypted.
+
+4. **Enroll the board** with the server. This reads its two public keys, creating them on first
+   use:
+
+   ```sh
+   uv run tools/enroll.py /dev/ttyACM0
+   ```
+
+**For each release:**
+
+5. **Bump `version`** in `firmware/app/Cargo.toml`. Boards are only offered versions newer than
+   theirs. Changing `LED_COLOR` in `main.rs` too makes the update visible.
+6. **Build the raw image.** From `firmware/`:
+
+   ```sh
+   cargo objcopy --release -p app -- -O binary target/app.bin
+   ```
+
+7. **Sign it** with the update key. This writes `firmware/target/app.signed`:
+
+   ```sh
+   uv run tools/sign.py firmware/target/app.bin
+   ```
+
+8. **Publish it** as an encrypted release on the server:
+
+   ```sh
+   uv run tools/release.py firmware/target/app.signed
+   ```
+
+9. **Install it on the board.** `bridge.py` asks the server for an update on the board's behalf,
+   then downloads the encrypted image and installs it:
+
+   ```sh
+   uv run tools/bridge.py /dev/ttyACM0
+   ```
+
+   ```
+   device   71ee3c8ba4aa108e651b4c50137feda4
+   running  0.1.0
+   latest   0.2.0
+   authorized
+   update   0.2.0, 86080 encrypted bytes
+   100%  86016/86016 bytes
+   verified in 2.7 s
+   done, the board is rebooting into 0.2.0
+   ```
+
+   The board reboots into the new image on trial, and confirms it after a 5 s self-test. Then
+   `version` in tio shows the new version and `status` says `update installed`, and running
+   `bridge.py` again prints `up to date`.
+
+### How it works
 
 How a request works:
 
@@ -452,20 +519,14 @@ How a request works:
 
 ### Releases
 
-To publish a new app version: bump `version` in `firmware/app/Cargo.toml`, build and sign the
-image as in [Update over USB](#update-over-usb) (steps 2 and 3), then from the repo root, with the
-server running:
+Once a release is published (step 8), `bridge.py` gets an offer for any board running an older
+version, downloads the encrypted image, and installs it with `update encrypted` (step 9).
 
-```sh
-uv run tools/release.py firmware/target/app.signed
-```
-
-From then on, `bridge.py` gets an offer for any board running an older version, and downloads the
-encrypted image:
-
-```
-update   0.2.0: downloaded 86080 encrypted bytes and the ticket
-```
+The board opens the ticket with its TPM (TPM2_ECDH_ZGen, then the rest of HPKE in the `hpke`
+crate), checks that its nonce is the one the board just signed in `request`, and decrypts the
+image block by block as it arrives. From there it's the same as [Update over USB](#update-over-usb):
+the signature check, then the trial boot. The protocol is described at the top of
+`firmware/app/src/update.rs`.
 
 How it's protected (envelope encryption, as in MCUboot's encrypted images):
 

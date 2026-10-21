@@ -77,13 +77,20 @@ pub(super) async fn sign(out: &mut Out, tpm: &mut Tpm, nonce: &[u8]) {
 
 /// `request <nonce>`: an update request for the update server, which sends the nonce. Prints the
 /// firmware version and the identity key's signature over the request (`r || s` in hex), as
-/// `<version> <signature>`; see [`identity`] for what gets signed.
-pub(super) async fn request(out: &mut Out, tpm: &mut Tpm, nonce: &[u8]) {
+/// `<version> <signature>`; see [`identity`] for what gets signed. Keeps the nonce in `last`, for
+/// `update encrypted` to check its ticket against.
+pub(super) async fn request(
+    out: &mut Out,
+    tpm: &mut Tpm,
+    last: &mut Option<[u8; identity::NONCE_LEN]>,
+    nonce: &[u8],
+) {
     let Some(nonce) = parse_nonce(out, nonce) else {
         return;
     };
     match identity::sign_request(tpm, &nonce).await {
         Ok(signature) => {
+            *last = Some(nonce);
             reply!(out, "{} ", identity::VERSION);
             out.hex(&signature.r);
             out.hex(&signature.s);

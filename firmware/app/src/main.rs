@@ -3,6 +3,7 @@
 
 mod console;
 mod identity;
+mod ticket;
 mod update;
 
 use core::cell::RefCell;
@@ -136,7 +137,12 @@ async fn main(spawner: Spawner) {
         Err(_) => "couldn't read boot state",
     };
 
-    let mut ctx = console::Context { boot, updater, tpm };
+    let mut ctx = console::Context {
+        boot,
+        updater,
+        tpm,
+        request_nonce: None,
+    };
     loop {
         serial.wait_connection().await;
         // Returns when the host goes away.

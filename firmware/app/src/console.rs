@@ -13,6 +13,7 @@ use embedded_storage::nor_flash::NorFlash;
 use heapless::String;
 use tpm::KeyKind;
 
+use crate::identity::NONCE_LEN;
 use crate::{Tpm, update};
 
 pub type Serial = CdcAcmClass<'static, usb::Driver<'static, USB>>;
@@ -31,6 +32,9 @@ pub struct Context<'a, DFU: NorFlash, STATE: NorFlash> {
     pub boot: &'static str,
     pub updater: BlockingFirmwareUpdater<'a, DFU, STATE>,
     pub tpm: Tpm,
+    /// The nonce of the last `request`, which `update encrypted` checks its ticket against. Each
+    /// is used once.
+    pub request_nonce: Option<[u8; NONCE_LEN]>,
 }
 
 /// Appends formatted text to an [`Out`], like `write!`.
@@ -124,7 +128,8 @@ async fn run_command<DFU: NorFlash, STATE: NorFlash>(
         b"" => {}
         b"help" => reply!(
             out,
-            "commands: help, version, status, tpm, pubkey [decrypt], sign, request, reboot, update\r\n"
+            "commands: help, version, status, tpm, pubkey [decrypt], sign, request, reboot, \
+             update [encrypted]\r\n"
         ),
         b"version" => reply!(out, "{}\r\n", env!("CARGO_PKG_VERSION")),
         b"status" => reply!(
@@ -140,7 +145,7 @@ async fn run_command<DFU: NorFlash, STATE: NorFlash>(
             tpm_commands::sign(&mut out, &mut ctx.tpm, &cmd[5..]).await
         }
         cmd if cmd.starts_with(b"request ") => {
-            tpm_commands::request(&mut out, &mut ctx.tpm, &cmd[8..]).await
+            tpm_commands::request(&mut out, &mut ctx.tpm, &mut ctx.request_nonce, &cmd[8..]).await
         }
         b"reboot" => {
             reply!(out, "rebooting\r\n");
@@ -148,27 +153,47 @@ async fn run_command<DFU: NorFlash, STATE: NorFlash>(
             reset().await;
         }
         // Normally sent by `tools/upload.py`, not typed.
-        b"update" => match update::receive(serial, &mut ctx.updater).await {
-            Ok(()) => {
-                reply!(out, "OK\r\n");
-                out.flush(serial).await?;
-                reset().await;
-            }
-            Err(update::Error::Disconnected) => return Err(Disconnected),
-            Err(e) => {
-                reply!(out, "ERR {}\r\n", e.message());
-                out.flush(serial).await?;
-                // Drop whatever the host still sends, so it isn't read as typed input.
-                let mut packet = [0u8; 64];
-                while let Ok(Ok(_)) =
-                    with_timeout(Duration::from_millis(100), serial.read_packet(&mut packet)).await
-                {
-                }
-            }
-        },
+        b"update" => {
+            let result = update::receive(serial, &mut ctx.updater).await;
+            finish_update(serial, &mut out, result).await?;
+        }
+        // Normally sent by `tools/bridge.py`, after `request`.
+        b"update encrypted" => {
+            let nonce = ctx.request_nonce.take();
+            let result =
+                update::receive_encrypted(serial, &mut ctx.updater, &mut ctx.tpm, nonce).await;
+            finish_update(serial, &mut out, result).await?;
+        }
         _ => reply!(out, "unknown command, try 'help'\r\n"),
     }
     out.flush(serial).await
+}
+
+/// After an update: `OK` and a reset into the new image, or the error. After an error, whatever
+/// the host still sends is dropped, so it isn't read as typed input.
+async fn finish_update(
+    serial: &mut Serial,
+    out: &mut Out,
+    result: Result<(), update::Error>,
+) -> Result<(), Disconnected> {
+    match result {
+        Ok(()) => {
+            reply!(out, "OK\r\n");
+            out.flush(serial).await?;
+            reset().await
+        }
+        Err(update::Error::Disconnected) => Err(Disconnected),
+        Err(e) => {
+            reply!(out, "ERR {e}\r\n");
+            out.flush(serial).await?;
+            let mut packet = [0u8; 64];
+            while let Ok(Ok(_)) =
+                with_timeout(Duration::from_millis(100), serial.read_packet(&mut packet)).await
+            {
+            }
+            Ok(())
+        }
+    }
 }
 
 /// Exactly `2 * N` hex digits, either case.

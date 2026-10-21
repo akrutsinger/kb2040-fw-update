@@ -13,11 +13,14 @@ SERVER defaults to http://localhost:8787, where `npm run dev` in worker/ serves.
 1. Gets a nonce from the server (POST /v1/challenge).
 2. Has the board sign an update request for it (`request <nonce>`).
 3. Sends the request to the server (POST /v1/update) and prints the answer.
-4. If the server offers a newer release, downloads its encrypted image (GET /v1/firmware/<version>).
-   Installing it on the board is still to come.
+4. If the server offers a newer release, downloads its encrypted image (GET /v1/firmware/<version>)
+   and installs it with `update encrypted`, which gives the board the ticket first. The board opens
+   the ticket with its TPM, decrypts the image as it arrives, and checks the signature before
+   switching to it.
 
 The bridge can't forge or alter a request: only the board's TPM can sign one, and the server
-checks it against the key it registered for the board.
+checks it against the key it registered for the board. It can't read the image either: the
+ticket only opens on that board.
 """
 
 import json
@@ -78,33 +81,38 @@ def main():
         board.fresh_prompt(port)
         identity = bytes.fromhex(board.command(port, "pubkey"))
         reply = board.command(port, f"request {nonce}").split()
-    if len(reply) != 2:
-        sys.exit(f"request: expected '<version> <signature>', got {' '.join(reply)!r}")
-    version, signature = reply
+        if len(reply) != 2:
+            sys.exit(f"request: expected '<version> <signature>', got {' '.join(reply)!r}")
+        version, signature = reply
 
-    answer = post(
-        server,
-        "/v1/update",
-        {
-            "device": board.device_id(identity),
-            "version": version,
-            "nonce": nonce,
-            "signature": signature,
-        },
-    )
-    print(f"device   {answer['device']}")
-    print(f"running  {answer['running']}")
-    print(f"latest   {answer['latest'] or 'no release yet'}")
-    print("authorized")
-    offer = answer["update"]
-    if offer is None:
-        print("up to date")
-        return
-    image = download(server, offer)
-    print(
-        f"update   {offer['version']}: downloaded {len(image)} encrypted bytes and the ticket"
-    )
-    print("(installing it on the board is the next step)")
+        answer = post(
+            server,
+            "/v1/update",
+            {
+                "device": board.device_id(identity),
+                "version": version,
+                "nonce": nonce,
+                "signature": signature,
+            },
+        )
+        print(f"device   {answer['device']}")
+        print(f"running  {answer['running']}")
+        print(f"latest   {answer['latest'] or 'no release yet'}")
+        print("authorized")
+        offer = answer["update"]
+        if offer is None:
+            print("up to date")
+            return
+        image = download(server, offer)
+        ticket = bytes.fromhex(offer["ticket"])
+        if len(ticket) > 255:
+            sys.exit(f"ticket is {len(ticket)} bytes, the board takes at most 255")
+        print(f"update   {offer['version']}, {len(image)} encrypted bytes")
+        # The board must not have run another `request` since; it checks the ticket's nonce.
+        board.send_update(
+            port, "update encrypted", image, enc=bytes.fromhex(offer["enc"]), ticket=ticket
+        )
+    print(f"done, the board is rebooting into {offer['version']}")
 
 
 if __name__ == "__main__":
