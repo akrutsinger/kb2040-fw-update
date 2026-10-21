@@ -6,6 +6,8 @@
 
 #![no_std]
 
+use core::fmt;
+
 use aes_gcm::aead::AeadInOut;
 use aes_gcm::{Aes128Gcm, KeyInit, Tag};
 use hkdf::{Hkdf, HkdfExtract};
@@ -26,6 +28,14 @@ const MODE_BASE: u8 = 0x00;
 /// and `aad`. The two aren't told apart, as usual for AEADs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OpenError;
+
+impl fmt::Display for OpenError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "HPKE message doesn't open")
+    }
+}
+
+impl core::error::Error for OpenError {}
 
 /// Opens a single-shot HPKE message (the first one of its context, sequence number 0).
 ///

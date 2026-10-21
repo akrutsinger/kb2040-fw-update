@@ -57,6 +57,8 @@ impl<S: fmt::Debug, P: fmt::Debug> fmt::Display for SpiError<S, P> {
     }
 }
 
+impl<S: fmt::Debug, P: fmt::Debug> core::error::Error for SpiError<S, P> {}
+
 /// TPM registers over SPI.
 pub struct SpiInterface<SPI, CS, D> {
     spi: SPI,

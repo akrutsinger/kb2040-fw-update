@@ -49,3 +49,6 @@ impl<E: fmt::Display> fmt::Display for Error<E> {
         }
     }
 }
+
+// No `source()`: `Display` already prints the inner error, so a chain would print it twice.
+impl<E: fmt::Debug + fmt::Display> core::error::Error for Error<E> {}

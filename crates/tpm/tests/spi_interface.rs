@@ -98,3 +98,10 @@ async fn splits_long_transfers_into_64_byte_frames() {
     iface.write(fifo, &data).await.unwrap();
     check(iface);
 }
+
+#[test]
+fn errors_box_as_std_errors() {
+    let error: Box<dyn std::error::Error> =
+        Box::new(tpm::Error::Bus(SpiError::<(), ()>::WaitState));
+    assert_eq!(error.to_string(), "TPM never ready (missing or miswired?)");
+}
