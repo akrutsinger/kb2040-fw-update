@@ -12,7 +12,7 @@ use embassy_usb::driver::EndpointError;
 use embedded_storage::nor_flash::NorFlash;
 use heapless::String;
 
-use crate::{Tpm, identity, update};
+use crate::{Tpm, update};
 
 pub type Serial = CdcAcmClass<'static, usb::Driver<'static, USB>>;
 
@@ -38,6 +38,9 @@ macro_rules! reply {
         $out.print(format_args!($($arg)*))
     };
 }
+
+// After `reply!`, so the command modules can use it.
+mod tpm_commands;
 
 /// A command's reply. It's collected here, then [`flush`](Out::flush)ed in as many packets as it
 /// takes. Sized for the longest reply (`pubkey`'s); anything past that is dropped.
@@ -129,9 +132,11 @@ async fn run_command<DFU: NorFlash, STATE: NorFlash>(
             env!("CARGO_PKG_VERSION"),
             ctx.boot
         ),
-        b"tpm" => tpm_info(&mut out, &mut ctx.tpm).await,
-        b"pubkey" => pubkey(&mut out, &mut ctx.tpm).await,
-        cmd if cmd.starts_with(b"sign ") => sign(&mut out, &mut ctx.tpm, &cmd[5..]).await,
+        b"tpm" => tpm_commands::info(&mut out, &mut ctx.tpm).await,
+        b"pubkey" => tpm_commands::pubkey(&mut out, &mut ctx.tpm).await,
+        cmd if cmd.starts_with(b"sign ") => {
+            tpm_commands::sign(&mut out, &mut ctx.tpm, &cmd[5..]).await
+        }
         b"reboot" => {
             reply!(out, "rebooting\r\n");
             out.flush(serial).await?;
@@ -159,72 +164,6 @@ async fn run_command<DFU: NorFlash, STATE: NorFlash>(
         _ => reply!(out, "unknown command, try 'help'\r\n"),
     }
     out.flush(serial).await
-}
-
-/// TCG vendor ID of Infineon, who make the SLB 9670.
-const INFINEON: u16 = 0x15D1;
-
-/// Prints the TPM's IDs, takes locality 0, and starts the TPM, which also shows whether it runs
-/// TPM 2.0 firmware. A wrong vendor usually means wiring: MISO floats when the TPM isn't driving
-/// it, so the ID reads as noise.
-async fn tpm_info(out: &mut Out, tpm: &mut Tpm) {
-    match tpm.id().await {
-        Ok(id) if id.vid == INFINEON => reply!(
-            out,
-            "Infineon TPM, did {:04x} rid {:02x}\r\n",
-            id.did,
-            id.rid
-        ),
-        Ok(id) => reply!(
-            out,
-            "ERR unexpected vendor {:04x}, check wiring\r\n",
-            id.vid
-        ),
-        Err(e) => reply!(out, "ERR {e}\r\n"),
-    }
-    match tpm.request_locality().await {
-        Ok(()) => reply!(out, "locality 0 active\r\n"),
-        Err(e) => {
-            reply!(out, "ERR {e}\r\n");
-            // Starting the TPM requests the locality again, so it would only repeat this error.
-            return;
-        }
-    }
-    match tpm.startup().await {
-        Ok(()) => reply!(out, "TPM 2.0, started\r\n"),
-        Err(e) => reply!(out, "ERR {e}\r\n"),
-    }
-}
-
-/// Prints the identity key as a SEC1 uncompressed point in hex, creating it on first use.
-async fn pubkey(out: &mut Out, tpm: &mut Tpm) {
-    match identity::public_key(tpm).await {
-        Ok((key, created)) => {
-            if created {
-                reply!(out, "created identity key\r\n");
-            }
-            out.hex(&key.to_sec1());
-            reply!(out, "\r\n");
-        }
-        Err(e) => reply!(out, "ERR {e}\r\n"),
-    }
-}
-
-/// `sign <nonce>`: signs a challenge with the identity key and prints the signature, `r || s` in
-/// hex. The nonce is 64 hex digits; see [`identity`] for what gets signed.
-async fn sign(out: &mut Out, tpm: &mut Tpm, nonce: &[u8]) {
-    let Some(nonce) = parse_hex::<{ identity::NONCE_LEN }>(nonce.trim_ascii()) else {
-        reply!(out, "ERR nonce must be 64 hex digits\r\n");
-        return;
-    };
-    match identity::sign_challenge(tpm, &nonce).await {
-        Ok(signature) => {
-            out.hex(&signature.r);
-            out.hex(&signature.s);
-            reply!(out, "\r\n");
-        }
-        Err(e) => reply!(out, "ERR {e}\r\n"),
-    }
 }
 
 /// Exactly `2 * N` hex digits, either case.
