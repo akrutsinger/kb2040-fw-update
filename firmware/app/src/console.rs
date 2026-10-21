@@ -84,7 +84,7 @@ pub async fn console<DFU: NorFlash, STATE: NorFlash>(
     ctx: &mut Context<'_, DFU, STATE>,
 ) -> Result<(), Disconnected> {
     let mut packet = [0u8; 64];
-    // Room for `sign` and its 64 hex digits.
+    // Room for `sign` or `request` and its 64 hex digits.
     let mut line = [0u8; 128];
     let mut len = 0;
     loop {
@@ -124,7 +124,7 @@ async fn run_command<DFU: NorFlash, STATE: NorFlash>(
         b"" => {}
         b"help" => reply!(
             out,
-            "commands: help, version, status, tpm, pubkey [decrypt], sign, reboot, update\r\n"
+            "commands: help, version, status, tpm, pubkey [decrypt], sign, request, reboot, update\r\n"
         ),
         b"version" => reply!(out, "{}\r\n", env!("CARGO_PKG_VERSION")),
         b"status" => reply!(
@@ -138,6 +138,9 @@ async fn run_command<DFU: NorFlash, STATE: NorFlash>(
         b"pubkey decrypt" => tpm_commands::pubkey(&mut out, &mut ctx.tpm, KeyKind::Decrypt).await,
         cmd if cmd.starts_with(b"sign ") => {
             tpm_commands::sign(&mut out, &mut ctx.tpm, &cmd[5..]).await
+        }
+        cmd if cmd.starts_with(b"request ") => {
+            tpm_commands::request(&mut out, &mut ctx.tpm, &cmd[8..]).await
         }
         b"reboot" => {
             reply!(out, "rebooting\r\n");

@@ -11,7 +11,7 @@ Example for how to do encrypted firmware updates using the Adafruit KB2040 (RP20
   - `tpm/`: async driver for the TPM (see [TPM](#tpm)), a platform-agnostic library the app uses
 - `tools/sign.py`: signs app images with the update key
 - `tools/upload.py`: sends a signed app image to the board over USB serial (see [Update over USB](#update-over-usb))
-- `tools/challenge.py`: checks that the board holds its identity key (see [Identity key](#identity-key))
+- `tools/challenge.py`: checks that the board holds its identity key and signs update requests (see [Identity key](#identity-key))
 - `tools/board.py`: console helpers that `upload.py` and `challenge.py` share (not a script itself)
 - `tools/tpmfactoryupd-openssl11.patch`: lets Infineon's TPM firmware tool build on a current Raspberry Pi OS (see [TPM 1.2 firmware](#tpm-12-firmware))
 - `keys/update.pub`: public half of the signing key (OpenSSH format), built into the app
@@ -353,6 +353,21 @@ uv run tools/challenge.py /dev/ttyACM0
 
 It verifies against the key the board itself reports, so it proves the board holds that key, not
 that it's the board you expect. Pinning known keys comes with the Worker (roadmap step 5).
+
+`request <nonce>` makes an update request for the update server, which supplies the nonce. The
+board signs `SHA-256("kb2040-fw-update/update-request/v1" || nonce || version)` with the same key,
+where `version` is the running firmware's (`version` in `firmware/app/Cargo.toml`). It prints
+`<version> <signature>`:
+
+```
+> request 3f9a...
+0.1.0 9c1e...
+```
+
+Checked against the board's registered key, a request proves which board asked, that it asked just
+now (the nonce is the server's), and which version it runs. The different prefix keeps a `sign`
+signature from passing as a request, and the other way around. `challenge.py` checks a request
+too.
 
 ### Decryption key
 

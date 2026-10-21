@@ -1,4 +1,4 @@
-//! The TPM commands: `tpm`, `pubkey [decrypt]` and `sign`.
+//! The TPM commands: `tpm`, `pubkey [decrypt]`, `sign` and `request`.
 
 use tpm::KeyKind;
 
@@ -62,8 +62,7 @@ pub(super) async fn pubkey(out: &mut Out, tpm: &mut Tpm, kind: KeyKind) {
 /// `sign <nonce>`: signs a challenge with the identity key and prints the signature, `r || s` in
 /// hex. The nonce is 64 hex digits; see [`identity`] for what gets signed.
 pub(super) async fn sign(out: &mut Out, tpm: &mut Tpm, nonce: &[u8]) {
-    let Some(nonce) = parse_hex::<{ identity::NONCE_LEN }>(nonce.trim_ascii()) else {
-        reply!(out, "ERR nonce must be 64 hex digits\r\n");
+    let Some(nonce) = parse_nonce(out, nonce) else {
         return;
     };
     match identity::sign_challenge(tpm, &nonce).await {
@@ -74,4 +73,31 @@ pub(super) async fn sign(out: &mut Out, tpm: &mut Tpm, nonce: &[u8]) {
         }
         Err(e) => reply!(out, "ERR {e}\r\n"),
     }
+}
+
+/// `request <nonce>`: an update request for the update server, which sends the nonce. Prints the
+/// firmware version and the identity key's signature over the request (`r || s` in hex), as
+/// `<version> <signature>`; see [`identity`] for what gets signed.
+pub(super) async fn request(out: &mut Out, tpm: &mut Tpm, nonce: &[u8]) {
+    let Some(nonce) = parse_nonce(out, nonce) else {
+        return;
+    };
+    match identity::sign_request(tpm, &nonce).await {
+        Ok(signature) => {
+            reply!(out, "{} ", identity::VERSION);
+            out.hex(&signature.r);
+            out.hex(&signature.s);
+            reply!(out, "\r\n");
+        }
+        Err(e) => reply!(out, "ERR {e}\r\n"),
+    }
+}
+
+/// The nonce argument of `sign` and `request`, or `None` after printing what's wrong with it.
+fn parse_nonce(out: &mut Out, hex: &[u8]) -> Option<[u8; identity::NONCE_LEN]> {
+    let nonce = parse_hex(hex.trim_ascii());
+    if nonce.is_none() {
+        reply!(out, "ERR nonce must be 64 hex digits\r\n");
+    }
+    nonce
 }
