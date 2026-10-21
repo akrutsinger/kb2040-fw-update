@@ -13,6 +13,8 @@ SERVER defaults to http://localhost:8787, where `npm run dev` in worker/ serves.
 1. Gets a nonce from the server (POST /v1/challenge).
 2. Has the board sign an update request for it (`request <nonce>`).
 3. Sends the request to the server (POST /v1/update) and prints the answer.
+4. If the server offers a newer release, downloads its encrypted image (GET /v1/firmware/<version>).
+   Installing it on the board is still to come.
 
 The bridge can't forge or alter a request: only the board's TPM can sign one, and the server
 checks it against the key it registered for the board.
@@ -54,6 +56,18 @@ def post(server, path, body):
         )
 
 
+def download(server, offer):
+    """The offered release's encrypted image, checked against the size the server announced."""
+    try:
+        with urllib.request.urlopen(server + offer["url"], timeout=TIMEOUT) as response:
+            image = response.read()
+    except urllib.error.URLError as e:
+        sys.exit(f"{offer['url']}: download failed ({e})")
+    if len(image) != offer["size"]:
+        sys.exit(f"{offer['url']}: got {len(image)} bytes, expected {offer['size']}")
+    return image
+
+
 def main():
     if len(sys.argv) not in (2, 3):
         sys.exit(__doc__)
@@ -82,6 +96,15 @@ def main():
     print(f"running  {answer['running']}")
     print(f"latest   {answer['latest'] or 'no release yet'}")
     print("authorized")
+    offer = answer["update"]
+    if offer is None:
+        print("up to date")
+        return
+    image = download(server, offer)
+    print(
+        f"update   {offer['version']}: downloaded {len(image)} encrypted bytes and the ticket"
+    )
+    print("(installing it on the board is the next step)")
 
 
 if __name__ == "__main__":

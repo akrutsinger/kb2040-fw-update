@@ -1,19 +1,34 @@
 /**
- * The update server. It hands out nonces and checks boards' signed update requests.
+ * The update server. It hands out nonces, checks boards' signed update requests, and offers them
+ * encrypted releases.
  *
  * - `POST /v1/challenge` returns `{ nonce }`, 32 bytes in hex.
  * - `POST /v1/update` takes `{ device, version, nonce, signature }`, which `tools/bridge.py` builds
- *   from the board's `request <nonce>`. It returns `{ authorized, device, running, latest }`.
+ *   from the board's `request <nonce>`. It returns `{ authorized, device, running, latest, update }`,
+ *   where `update` is an {@link Offer} if there's a newer release, otherwise null.
+ * - `GET /v1/firmware/<version>` returns that release's encrypted image. It's public: without a
+ *   ticket, it's useless.
  *
- * Boards are registered in KV as `device:<id>` by `tools/enroll.py`. A request is only checked
- * against the registered identity key, never a key that comes with the request. The signed format
+ * Storage, written by the tools:
+ * - KV `device:<id>`: a registered board ({@link Device}), by `tools/enroll.py`.
+ * - KV `release:<version>` ({@link Release}) and `release:latest` (a version), by
+ *   `tools/release.py`.
+ * - R2 `<version>.bin`: the encrypted image, by `tools/release.py`.
+ *
+ * A request is only checked against the registered identity key, and a ticket is only sealed to
+ * the registered decryption key, never keys that come with the request. The signed request format
  * is described in `firmware/app/src/identity.rs`.
  */
 
+import { Aes128Gcm, CipherSuite, DhkemP256HkdfSha256, HkdfSha256 } from "@hpke/core";
+
 interface Env {
   KV: KVNamespace;
+  RELEASES: R2Bucket;
   /** 32 random bytes in hex. From `.dev.vars` locally, a Worker secret once deployed. */
   NONCE_KEY: string;
+  /** Wraps each release's content key (AES-256-GCM). 32 random bytes in hex, like `NONCE_KEY`. */
+  RELEASE_KEK: string;
 }
 
 /** A registered board, as `tools/enroll.py` stores it. Keys are SEC1 uncompressed points in hex. */
@@ -23,6 +38,27 @@ interface Device {
   enrolled: string;
 }
 
+/** A release, as `tools/release.py` stores it. */
+interface Release {
+  /** Bytes in the encrypted image: the signed image and its 64-byte signature. */
+  size: number;
+  /** AES-128-CTR initial counter block, 16 bytes in hex. */
+  iv: string;
+  /** The content key, wrapped: `nonce (12) || AES-256-GCM(RELEASE_KEK, key)`, in hex. */
+  key: string;
+}
+
+/** What a board is offered: where to get the image, and the ticket to decrypt it. */
+interface Offer {
+  version: string;
+  size: number;
+  url: string;
+  /** HPKE encapsulated key, a 65-byte SEC1 point in hex. */
+  enc: string;
+  /** The sealed ticket, in hex. See {@link offer}. */
+  ticket: string;
+}
+
 /** Must match `REQUEST_DOMAIN` in `firmware/app/src/identity.rs`. */
 const REQUEST_DOMAIN = new TextEncoder().encode("kb2040-fw-update/update-request/v1");
 const NONCE_LEN = 32;
@@ -30,6 +66,12 @@ const NONCE_LEN = 32;
 const NONCE_TTL_S = 300;
 /** Device ids are the first 16 bytes of SHA-256(identity key). */
 const DEVICE_ID_LEN = 16;
+/** HPKE `info` prefix for tickets; the board's id follows it. */
+const TICKET_INFO = new TextEncoder().encode("kb2040-fw-update/ticket/v1");
+/** AAD prefix for a wrapped content key; the version follows it. Must match `tools/release.py`. */
+const RELEASE_KEY_AAD = new TextEncoder().encode("kb2040-fw-update/release-key/v1");
+/** Release versions: `major.minor.patch`, as in `firmware/app/Cargo.toml`. */
+const VERSION = /^(\d+)\.(\d+)\.(\d+)$/;
 
 export default {
   async fetch(request, env): Promise<Response> {
@@ -39,6 +81,10 @@ export default {
     }
     if (request.method === "POST" && pathname === "/v1/update") {
       return update(request, env);
+    }
+    const firmware = pathname.match(/^\/v1\/firmware\/([^/]+)$/);
+    if (request.method === "GET" && firmware && VERSION.test(firmware[1])) {
+      return download(env, firmware[1]);
     }
     return error(404, "not found");
   },
@@ -95,9 +141,109 @@ async function update(request: Request, env: Env): Promise<Response> {
     return error(403, "bad signature");
   }
 
-  // Set by the release tooling (a later step); null until then.
   const latest = await env.KV.get("release:latest");
-  return Response.json({ authorized: true, device: id, running: version, latest });
+  const update =
+    latest !== null && newer(latest, version)
+      ? await offer(env, latest, deviceId, record, nonceBytes)
+      : null;
+  return Response.json({ authorized: true, device: id, running: version, latest, update });
+}
+
+/**
+ * Offers release `version` to a board: where to download its encrypted image, and a ticket only
+ * that board can open. The ticket is
+ * `content key (16) || iv (16) || size (4, little-endian) || nonce (32) || version`,
+ * sealed with HPKE (RFC 9180, base mode, DHKEM(P-256, HKDF-SHA256), HKDF-SHA256, AES-128-GCM) to
+ * the board's decryption key, with `TICKET_INFO || device id` as `info`. The nonce is the
+ * request's, so the board can tell that the ticket answers its own request.
+ */
+async function offer(
+  env: Env,
+  version: string,
+  deviceId: Uint8Array,
+  device: Device,
+  nonce: Uint8Array,
+): Promise<Offer> {
+  const release = await env.KV.get<Release>(`release:${version}`, "json");
+  if (!release) {
+    throw new Error(`release:latest is ${version}, but release:${version} is missing`);
+  }
+  const size = new Uint8Array(4);
+  new DataView(size.buffer).setUint32(0, release.size, true);
+  const ticket = concat(
+    await contentKey(env, version, release.key),
+    fromHex(release.iv, 16)!,
+    size,
+    nonce,
+    new TextEncoder().encode(version),
+  );
+  const suite = new CipherSuite({
+    kem: new DhkemP256HkdfSha256(),
+    kdf: new HkdfSha256(),
+    aead: new Aes128Gcm(),
+  });
+  const recipientPublicKey = await suite.kem.deserializePublicKey(fromHex(device.decrypt, 65)!);
+  const { ct, enc } = await suite.seal(
+    { recipientPublicKey, info: concat(TICKET_INFO, deviceId) },
+    ticket,
+  );
+  return {
+    version,
+    size: release.size,
+    url: `/v1/firmware/${version}`,
+    enc: toHex(new Uint8Array(enc)),
+    ticket: toHex(new Uint8Array(ct)),
+  };
+}
+
+/** Unwraps a release's content key with `RELEASE_KEK`. The AAD ties it to its version. */
+async function contentKey(env: Env, version: string, wrapped: string): Promise<Uint8Array> {
+  const kek = fromHex(env.RELEASE_KEK ?? "", 32);
+  if (!kek) {
+    throw new Error("RELEASE_KEK must be 32 bytes in hex (see README)");
+  }
+  const bytes = fromHex(wrapped, 12 + 16 + 16)!;
+  const key = await crypto.subtle.importKey("raw", kek, "AES-GCM", false, ["decrypt"]);
+  const plaintext = await crypto.subtle.decrypt(
+    {
+      name: "AES-GCM",
+      iv: bytes.subarray(0, 12),
+      additionalData: concat(RELEASE_KEY_AAD, new TextEncoder().encode(version)),
+    },
+    key,
+    bytes.subarray(12),
+  );
+  return new Uint8Array(plaintext);
+}
+
+async function download(env: Env, version: string): Promise<Response> {
+  const image = await env.RELEASES.get(`${version}.bin`);
+  if (!image) {
+    return error(404, `no release ${version}`);
+  }
+  return new Response(image.body, {
+    headers: {
+      "Content-Type": "application/octet-stream",
+      "Content-Length": String(image.size),
+    },
+  });
+}
+
+/**
+ * True if `a` is a newer version than `b`. Anything that isn't `major.minor.patch` is never newer,
+ * so boards are only ever offered upgrades.
+ */
+function newer(a: string, b: string): boolean {
+  const [ma, mb] = [a.match(VERSION), b.match(VERSION)];
+  if (!ma || !mb) {
+    return false;
+  }
+  for (let i = 1; i <= 3; i++) {
+    if (Number(ma[i]) !== Number(mb[i])) {
+      return Number(ma[i]) > Number(mb[i]);
+    }
+  }
+  return false;
 }
 
 /**

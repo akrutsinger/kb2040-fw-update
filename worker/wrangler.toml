@@ -7,3 +7,9 @@ compatibility_date = "2026-10-01"
 [[kv_namespaces]]
 binding = "KV"
 id = "local"
+
+# Encrypted release images, `<version>.bin`, uploaded by tools/release.py. Also kept locally in
+# .wrangler/ by `wrangler dev`.
+[[r2_buckets]]
+binding = "RELEASES"
+bucket_name = "kb2040-fw-update-releases"

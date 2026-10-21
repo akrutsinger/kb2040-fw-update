@@ -14,6 +14,7 @@ Example for how to do encrypted firmware updates using the Adafruit KB2040 (RP20
 - `tools/challenge.py`: checks that the board holds its identity key and signs update requests (see [Identity key](#identity-key))
 - `tools/enroll.py`: registers a board's keys with the update server (see [Update server](#update-server))
 - `tools/bridge.py`: carries a board's update request to the update server and back
+- `tools/release.py`: publishes a signed image as an encrypted release (see [Releases](#releases))
 - `tools/board.py`: console helpers the scripts share (not a script itself)
 - `tools/tpmfactoryupd-openssl11.patch`: lets Infineon's TPM firmware tool build on a current Raspberry Pi OS (see [TPM 1.2 firmware](#tpm-12-firmware))
 - `keys/update.pub`: public half of the signing key (OpenSSH format), built into the app
@@ -398,17 +399,18 @@ with wait states (see `tpm/src/interface/spi.rs`).
 `worker/` is the update server, a [Cloudflare Worker](https://developers.cloudflare.com/workers/) in
 TypeScript. Cloudflare runs Workers on its own network, close to whoever calls them, so there's no
 server to run. While developing, `wrangler dev` runs the same runtime locally, with a local copy of
-its storage (KV) in `worker/.wrangler/`. The board has no network, so `tools/bridge.py` carries its
-messages over USB serial.
+its storage (KV for records, R2 for images) in `worker/.wrangler/`. The board has no network, so
+`tools/bridge.py` carries its messages over USB serial.
 
-For now it checks that an update request comes from a registered board. Delivering encrypted
-updates comes next.
+It checks that an update request comes from a registered board, and offers that board a newer
+release, encrypted so that only the board can read it. Installing it on the board comes next.
 
 Setup, once, from `worker/`:
 
 ```sh
 npm install
-echo "NONCE_KEY=$(openssl rand -hex 32)" > .dev.vars   # local secret, gitignored
+echo "NONCE_KEY=$(openssl rand -hex 32)" > .dev.vars     # local secrets, gitignored
+echo "RELEASE_KEK=$(openssl rand -hex 32)" >> .dev.vars
 ```
 
 Then `npm run dev` (from `worker/`) serves on `http://localhost:8787`. With it running, from the
@@ -445,8 +447,46 @@ How a request works:
   Durable Object).
 - `npm run check` type-checks the Worker. It first generates the runtime types with
   `wrangler types`.
-- npm 11 blocks workerd's install script by default and warns about it during `npm install`.
-  `wrangler dev` works without it.
+- npm 11 blocks the install scripts of esbuild and workerd (both come with wrangler) by default,
+  and warns about them during `npm install`. `wrangler dev` works without them.
+
+### Releases
+
+To publish a new app version: bump `version` in `firmware/app/Cargo.toml`, build and sign the
+image as in [Update over USB](#update-over-usb) (steps 2 and 3), then from the repo root, with the
+server running:
+
+```sh
+uv run tools/release.py firmware/target/app.signed
+```
+
+From then on, `bridge.py` gets an offer for any board running an older version, and downloads the
+encrypted image:
+
+```
+update   0.2.0: downloaded 86080 encrypted bytes and the ticket
+```
+
+How it's protected (envelope encryption, as in MCUboot's encrypted images):
+
+- **Once per release**, `release.py` encrypts the whole `.signed` file (image and signature) with a
+  fresh random AES-128 key, in CTR mode. The encrypted image goes to R2, and is public: it's
+  useless without the key. The key itself is stored in KV wrapped with `RELEASE_KEK`
+  (AES-256-GCM, with the version as AAD). `release.py` reads `RELEASE_KEK` from `worker/.dev.vars`.
+- **Once per request**, the server unwraps the key and seals a ticket to the board's registered
+  decryption key, with HPKE (RFC 9180: DHKEM(P-256, HKDF-SHA256), HKDF-SHA256, AES-128-GCM). The
+  ticket is `content key || IV || size || nonce || version`, and HPKE's `info` holds the board's
+  id. Only that board's TPM can open it, with TPM2_ECDH_ZGen, and the nonce shows it answers the
+  board's own request.
+- **Integrity** still comes from the Ed25519 signature over the plaintext image, which the board
+  checks before installing. The update server never has the signing key (`keys/update`), so even a
+  compromised server can't make a board run its code.
+- **Only upgrades** are offered: versions compare as numbers (`0.0.10` is older than `0.1.0`), and a
+  board on the latest version or newer gets `up to date`. The board itself doesn't refuse older
+  images yet (anti-rollback is a stretch goal).
+- **One key per release** means that anyone who gets that key out of one board (the RP2040 has no
+  flash read protection or secure boot) can decrypt that release. The TPM protects the key in
+  transit and at rest, not the firmware once it's installed.
 
 ## Board notes
 
