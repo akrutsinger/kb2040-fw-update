@@ -104,7 +104,7 @@ async fn main(spawner: Spawner) {
         spi::Config::default(),
     );
     let cs = Output::new(p.PIN_10, Level::High);
-    let mut tpm = Tpm::new(SpiInterface::new(spi, cs), Delay);
+    let tpm = Tpm::new(SpiInterface::new(spi, cs), Delay);
 
     // DFU and BOOTLOADER_STATE partitions, from the shared linker layout.
     let flash = Mutex::<NoopRawMutex, _>::new(RefCell::new(
@@ -136,10 +136,11 @@ async fn main(spawner: Spawner) {
         Err(_) => "couldn't read boot state",
     };
 
+    let mut ctx = console::Context { boot, updater, tpm };
     loop {
         serial.wait_connection().await;
         // Returns when the host goes away.
-        let _ = console::console(&mut serial, boot, &mut updater, &mut tpm).await;
+        let _ = console::console(&mut serial, &mut ctx).await;
     }
 }
 

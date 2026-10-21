@@ -1,6 +1,6 @@
 //! Line-based console over USB serial.
 
-use core::fmt::Write;
+use core::fmt::{self, Write};
 
 use cortex_m::peripheral::SCB;
 use embassy_boot_rp::BlockingFirmwareUpdater;
@@ -24,8 +24,52 @@ impl From<EndpointError> for Disconnected {
     }
 }
 
-/// Line-based console: echoes input and runs a command on Enter. Most replies are written as one
-/// packet, so they must fit in 64 bytes; longer ones go through [`write_all`].
+/// What the commands work on.
+pub struct Context<'a, DFU: NorFlash, STATE: NorFlash> {
+    /// How this boot went, for `status`.
+    pub boot: &'static str,
+    pub updater: BlockingFirmwareUpdater<'a, DFU, STATE>,
+    pub tpm: Tpm,
+}
+
+/// Appends formatted text to an [`Out`], like `write!`.
+macro_rules! reply {
+    ($out:expr, $($arg:tt)*) => {
+        $out.print(format_args!($($arg)*))
+    };
+}
+
+/// A command's reply. It's collected here, then [`flush`](Out::flush)ed in as many packets as it
+/// takes. Sized for the longest reply (`pubkey`'s); anything past that is dropped.
+struct Out(String<256>);
+
+impl Out {
+    fn new() -> Self {
+        Self(String::new())
+    }
+
+    fn print(&mut self, args: fmt::Arguments<'_>) {
+        let _ = self.0.write_fmt(args);
+    }
+
+    /// Appends `bytes` in lowercase hex.
+    fn hex(&mut self, bytes: &[u8]) {
+        for b in bytes {
+            reply!(self, "{b:02x}");
+        }
+    }
+
+    async fn flush(&mut self, serial: &mut Serial) -> Result<(), Disconnected> {
+        if !self.0.is_empty() {
+            write_all(serial, self.0.as_bytes()).await?;
+            self.0.clear();
+        }
+        Ok(())
+    }
+}
+
+/// Line-based console: echoes input and runs a command on Enter. Each command's reply is sent
+/// once the command is done.
 ///
 /// This isn't the avengers, there's no banner on connect. `wait_connection()` returns when the host
 /// enumerates the device, not when a terminal opens the port, so a banner arrives while `tio` is
@@ -33,9 +77,7 @@ impl From<EndpointError> for Disconnected {
 /// prompt.
 pub async fn console<DFU: NorFlash, STATE: NorFlash>(
     serial: &mut Serial,
-    boot: &str,
-    updater: &mut BlockingFirmwareUpdater<'_, DFU, STATE>,
-    tpm: &mut Tpm,
+    ctx: &mut Context<'_, DFU, STATE>,
 ) -> Result<(), Disconnected> {
     let mut packet = [0u8; 64];
     // Room for `sign` and its 64 hex digits.
@@ -48,7 +90,7 @@ pub async fn console<DFU: NorFlash, STATE: NorFlash>(
                 // Terminals send CR for Enter.
                 b'\r' => {
                     serial.write_packet(b"\r\n").await?;
-                    run_command(serial, &line[..len], boot, updater, tpm).await?;
+                    run_command(serial, &line[..len], ctx).await?;
                     len = 0;
                     serial.write_packet(b"> ").await?;
                 }
@@ -71,50 +113,41 @@ pub async fn console<DFU: NorFlash, STATE: NorFlash>(
 async fn run_command<DFU: NorFlash, STATE: NorFlash>(
     serial: &mut Serial,
     line: &[u8],
-    boot: &str,
-    updater: &mut BlockingFirmwareUpdater<'_, DFU, STATE>,
-    tpm: &mut Tpm,
+    ctx: &mut Context<'_, DFU, STATE>,
 ) -> Result<(), Disconnected> {
+    let mut out = Out::new();
     match line.trim_ascii() {
         b"" => {}
-        b"help" => {
-            write_all(
-                serial,
-                b"commands: help, version, status, tpm, pubkey, sign, reboot, update\r\n",
-            )
-            .await?
-        }
-        b"version" => {
-            serial
-                .write_packet(concat!(env!("CARGO_PKG_VERSION"), "\r\n").as_bytes())
-                .await?
-        }
-        b"status" => {
-            serial
-                .write_packet(concat!("version ", env!("CARGO_PKG_VERSION"), "\r\n").as_bytes())
-                .await?;
-            serial.write_packet(b"boot    ").await?;
-            serial.write_packet(boot.as_bytes()).await?;
-            serial.write_packet(b"\r\n").await?;
-        }
-        b"tpm" => tpm_info(serial, tpm).await?,
-        b"pubkey" => pubkey(serial, tpm).await?,
-        cmd if cmd.starts_with(b"sign ") => sign(serial, tpm, &cmd[5..]).await?,
+        b"help" => reply!(
+            out,
+            "commands: help, version, status, tpm, pubkey, sign, reboot, update\r\n"
+        ),
+        b"version" => reply!(out, "{}\r\n", env!("CARGO_PKG_VERSION")),
+        b"status" => reply!(
+            out,
+            "version {}\r\nboot    {}\r\n",
+            env!("CARGO_PKG_VERSION"),
+            ctx.boot
+        ),
+        b"tpm" => tpm_info(&mut out, &mut ctx.tpm).await,
+        b"pubkey" => pubkey(&mut out, &mut ctx.tpm).await,
+        cmd if cmd.starts_with(b"sign ") => sign(&mut out, &mut ctx.tpm, &cmd[5..]).await,
         b"reboot" => {
-            serial.write_packet(b"rebooting\r\n").await?;
+            reply!(out, "rebooting\r\n");
+            out.flush(serial).await?;
             reset().await;
         }
         // Normally sent by `tools/upload.py`, not typed.
-        b"update" => match update::receive(serial, updater).await {
+        b"update" => match update::receive(serial, &mut ctx.updater).await {
             Ok(()) => {
-                serial.write_packet(b"OK\r\n").await?;
+                reply!(out, "OK\r\n");
+                out.flush(serial).await?;
                 reset().await;
             }
             Err(update::Error::Disconnected) => return Err(Disconnected),
             Err(e) => {
-                serial.write_packet(b"ERR ").await?;
-                serial.write_packet(e.message().as_bytes()).await?;
-                serial.write_packet(b"\r\n").await?;
+                reply!(out, "ERR {}\r\n", e.message());
+                out.flush(serial).await?;
                 // Drop whatever the host still sends, so it isn't read as typed input.
                 let mut packet = [0u8; 64];
                 while let Ok(Ok(_)) =
@@ -123,13 +156,9 @@ async fn run_command<DFU: NorFlash, STATE: NorFlash>(
                 }
             }
         },
-        _ => {
-            serial
-                .write_packet(b"unknown command, try 'help'\r\n")
-                .await?
-        }
+        _ => reply!(out, "unknown command, try 'help'\r\n"),
     }
-    Ok(())
+    out.flush(serial).await
 }
 
 /// TCG vendor ID of Infineon, who make the SLB 9670.
@@ -138,88 +167,63 @@ const INFINEON: u16 = 0x15D1;
 /// Prints the TPM's IDs, takes locality 0, and starts the TPM, which also shows whether it runs
 /// TPM 2.0 firmware. A wrong vendor usually means wiring: MISO floats when the TPM isn't driving
 /// it, so the ID reads as noise.
-async fn tpm_info(serial: &mut Serial, tpm: &mut Tpm) -> Result<(), Disconnected> {
-    let mut reply = String::<64>::new();
-    // Every reply fits, so `write!` can't fail.
-    let _ = match tpm.id().await {
-        Ok(id) if id.vid == INFINEON => write!(
-            reply,
+async fn tpm_info(out: &mut Out, tpm: &mut Tpm) {
+    match tpm.id().await {
+        Ok(id) if id.vid == INFINEON => reply!(
+            out,
             "Infineon TPM, did {:04x} rid {:02x}\r\n",
-            id.did, id.rid
+            id.did,
+            id.rid
         ),
-        Ok(id) => write!(
-            reply,
+        Ok(id) => reply!(
+            out,
             "ERR unexpected vendor {:04x}, check wiring\r\n",
             id.vid
         ),
-        Err(e) => write!(reply, "ERR {e}\r\n"),
-    };
-    serial.write_packet(reply.as_bytes()).await?;
-
-    reply.clear();
-    let _ = match tpm.request_locality().await {
-        Ok(()) => write!(reply, "locality 0 active\r\n"),
-        Err(e) => write!(reply, "ERR {e}\r\n"),
-    };
-    serial.write_packet(reply.as_bytes()).await?;
-
-    reply.clear();
-    let _ = match tpm.startup().await {
-        Ok(()) => write!(reply, "TPM 2.0, started\r\n"),
-        Err(e) => write!(reply, "ERR {e}\r\n"),
-    };
-    serial.write_packet(reply.as_bytes()).await?;
-    Ok(())
+        Err(e) => reply!(out, "ERR {e}\r\n"),
+    }
+    match tpm.request_locality().await {
+        Ok(()) => reply!(out, "locality 0 active\r\n"),
+        Err(e) => {
+            reply!(out, "ERR {e}\r\n");
+            // Starting the TPM requests the locality again, so it would only repeat this error.
+            return;
+        }
+    }
+    match tpm.startup().await {
+        Ok(()) => reply!(out, "TPM 2.0, started\r\n"),
+        Err(e) => reply!(out, "ERR {e}\r\n"),
+    }
 }
 
 /// Prints the identity key as a SEC1 uncompressed point in hex, creating it on first use.
-async fn pubkey(serial: &mut Serial, tpm: &mut Tpm) -> Result<(), Disconnected> {
-    // 65 bytes of key in hex, plus CR LF.
-    let mut reply = String::<132>::new();
-    // Every reply fits, so `write!` can't fail.
+async fn pubkey(out: &mut Out, tpm: &mut Tpm) {
     match identity::public_key(tpm).await {
         Ok((key, created)) => {
             if created {
-                serial.write_packet(b"created identity key\r\n").await?;
+                reply!(out, "created identity key\r\n");
             }
-            push_hex(&mut reply, &key.to_sec1());
-            let _ = write!(reply, "\r\n");
+            out.hex(&key.to_sec1());
+            reply!(out, "\r\n");
         }
-        Err(e) => {
-            let _ = write!(reply, "ERR {e}\r\n");
-        }
+        Err(e) => reply!(out, "ERR {e}\r\n"),
     }
-    write_all(serial, reply.as_bytes()).await
 }
 
 /// `sign <nonce>`: signs a challenge with the identity key and prints the signature, `r || s` in
 /// hex. The nonce is 64 hex digits; see [`identity`] for what gets signed.
-async fn sign(serial: &mut Serial, tpm: &mut Tpm, nonce: &[u8]) -> Result<(), Disconnected> {
-    // 64 bytes of signature in hex, plus CR LF.
-    let mut reply = String::<130>::new();
-    // Every reply fits, so `write!` can't fail.
-    match parse_hex::<{ identity::NONCE_LEN }>(nonce.trim_ascii()) {
-        None => {
-            let _ = write!(reply, "ERR nonce must be 64 hex digits\r\n");
+async fn sign(out: &mut Out, tpm: &mut Tpm, nonce: &[u8]) {
+    let Some(nonce) = parse_hex::<{ identity::NONCE_LEN }>(nonce.trim_ascii()) else {
+        reply!(out, "ERR nonce must be 64 hex digits\r\n");
+        return;
+    };
+    match identity::sign_challenge(tpm, &nonce).await {
+        Ok(signature) => {
+            out.hex(&signature.r);
+            out.hex(&signature.s);
+            reply!(out, "\r\n");
         }
-        Some(nonce) => match identity::sign_challenge(tpm, &nonce).await {
-            Ok(signature) => {
-                push_hex(&mut reply, &signature.r);
-                push_hex(&mut reply, &signature.s);
-                let _ = write!(reply, "\r\n");
-            }
-            Err(e) => {
-                let _ = write!(reply, "ERR {e}\r\n");
-            }
-        },
-    }
-    write_all(serial, reply.as_bytes()).await
-}
-
-/// Appends `bytes` in lowercase hex. The caller sizes `out` for it.
-fn push_hex<const N: usize>(out: &mut String<N>, bytes: &[u8]) {
-    for b in bytes {
-        let _ = write!(out, "{b:02x}");
+        Err(e) => reply!(out, "ERR {e}\r\n"),
     }
 }
 
