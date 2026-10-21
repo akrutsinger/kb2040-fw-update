@@ -45,7 +45,7 @@ const LED_COLOR: RGB8 = RGB8::new(0, 0, 32);
 
 type Led = PioWs2812<'static, PIO0, 0, 1, Grb>;
 /// The TPM9670 board, see the README for wiring.
-pub type Tpm = tpm::Tpm<SpiInterface<Spi<'static, SPI0, Async>, Output<'static>>, Delay>;
+pub type Tpm = tpm::Tpm<SpiInterface<Spi<'static, SPI0, Async>, Output<'static>, Delay>, Delay>;
 pub type TpmError = tpm::Error<SpiError<spi::Error, Infallible>>;
 
 #[embassy_executor::main]
@@ -104,7 +104,7 @@ async fn main(spawner: Spawner) {
         spi::Config::default(),
     );
     let cs = Output::new(p.PIN_10, Level::High);
-    let tpm = Tpm::new(SpiInterface::new(spi, cs), Delay);
+    let tpm = Tpm::new(SpiInterface::new(spi, cs, Delay), Delay);
 
     // DFU and BOOTLOADER_STATE partitions, from the shared linker layout.
     let flash = Mutex::<NoopRawMutex, _>::new(RefCell::new(

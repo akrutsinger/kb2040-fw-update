@@ -14,6 +14,7 @@
 use core::fmt;
 
 use embedded_hal::digital::OutputPin;
+use embedded_hal_async::delay::DelayNs;
 use embedded_hal_async::spi::SpiBus;
 
 use super::Interface;
@@ -29,6 +30,10 @@ const MAX_TRANSFER: usize = 64;
 const READY: u8 = 0x01;
 /// Wait-state bytes to clock before giving up, as in the Linux driver (`TPM_RETRY`).
 pub const MAX_WAIT_STATES: usize = 50;
+/// Pause between the last data byte and CS# going high, as in the Linux driver. It was added for
+/// a Raspberry Pi 2 SPI controller that sometimes released CS# before the last clock, which made
+/// the TPM drop the transfer (Linux commit 5cc0101d1f88).
+const CS_HOLD_US: u32 = 5;
 
 /// Errors from [`SpiInterface`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,21 +58,22 @@ impl<S: fmt::Debug, P: fmt::Debug> fmt::Display for SpiError<S, P> {
 }
 
 /// TPM registers over SPI.
-pub struct SpiInterface<SPI, CS> {
+pub struct SpiInterface<SPI, CS, D> {
     spi: SPI,
     cs: CS,
+    delay: D,
 }
 
-impl<SPI: SpiBus, CS: OutputPin> SpiInterface<SPI, CS> {
+impl<SPI: SpiBus, CS: OutputPin, D: DelayNs> SpiInterface<SPI, CS, D> {
     /// Wraps an SPI bus (mode 0, up to 43 MHz on the SLB 9670) and the CS# pin, which should start
-    /// high.
-    pub fn new(spi: SPI, cs: CS) -> Self {
-        Self { spi, cs }
+    /// high. `delay` times the hold before CS# goes high.
+    pub fn new(spi: SPI, cs: CS, delay: D) -> Self {
+        Self { spi, cs, delay }
     }
 
-    /// Releases the bus and the pin.
-    pub fn release(self) -> (SPI, CS) {
-        (self.spi, self.cs)
+    /// Releases the bus, the pin and the delay.
+    pub fn release(self) -> (SPI, CS, D) {
+        (self.spi, self.cs, self.delay)
     }
 
     /// Sends the header, then clocks through any wait states. CS# must already be low.
@@ -109,7 +115,9 @@ impl<SPI: SpiBus, CS: OutputPin> SpiInterface<SPI, CS> {
     ) -> Result<(), SpiError<SPI::Error, CS::Error>> {
         self.header(READ, addr, data.len()).await?;
         self.spi.read(data).await.map_err(SpiError::Spi)?;
-        self.spi.flush().await.map_err(SpiError::Spi)
+        self.spi.flush().await.map_err(SpiError::Spi)?;
+        self.delay.delay_us(CS_HOLD_US).await;
+        Ok(())
     }
 
     async fn write_frame(
@@ -119,13 +127,15 @@ impl<SPI: SpiBus, CS: OutputPin> SpiInterface<SPI, CS> {
     ) -> Result<(), SpiError<SPI::Error, CS::Error>> {
         self.header(WRITE, addr, data.len()).await?;
         self.spi.write(data).await.map_err(SpiError::Spi)?;
-        self.spi.flush().await.map_err(SpiError::Spi)
+        self.spi.flush().await.map_err(SpiError::Spi)?;
+        self.delay.delay_us(CS_HOLD_US).await;
+        Ok(())
     }
 }
 
 /// Data longer than 64 bytes goes out as several transfers to the same address. That only makes
 /// sense for the data FIFO, which is the only register that long.
-impl<SPI: SpiBus, CS: OutputPin> Interface for SpiInterface<SPI, CS> {
+impl<SPI: SpiBus, CS: OutputPin, D: DelayNs> Interface for SpiInterface<SPI, CS, D> {
     type Error = SpiError<SPI::Error, CS::Error>;
 
     async fn write(&mut self, addr: u16, data: &[u8]) -> Result<(), Self::Error> {

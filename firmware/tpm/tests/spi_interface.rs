@@ -1,6 +1,7 @@
 //! `SpiInterface` framing: the header bytes, wait states and 64-byte chunks, checked against the
 //! PTP spec's SPI protocol (section 6.4).
 
+use embedded_hal_mock::eh1::delay::NoopDelay;
 use embedded_hal_mock::eh1::digital::{Mock as PinMock, State, Transaction as Pin};
 use embedded_hal_mock::eh1::spi::{Mock as SpiMock, Transaction as Spi};
 use tpm::Interface;
@@ -22,8 +23,8 @@ fn header(read: bool, len: usize, addr: u16, last_miso: u8) -> Spi<u8> {
     Spi::transfer_in_place(vec![first, 0xD4, hi, lo], vec![0, 0, 0, last_miso])
 }
 
-fn check(iface: SpiInterface<SpiMock<u8>, PinMock>) {
-    let (mut spi, mut cs) = iface.release();
+fn check(iface: SpiInterface<SpiMock<u8>, PinMock, NoopDelay>) {
+    let (mut spi, mut cs, _) = iface.release();
     spi.done();
     cs.done();
 }
@@ -35,7 +36,7 @@ async fn read_sends_header_then_reads() {
         Spi::read_vec(vec![0xD1, 0x15, 0x1B, 0x00]),
         Spi::flush(),
     ]);
-    let mut iface = SpiInterface::new(spi, cs(1));
+    let mut iface = SpiInterface::new(spi, cs(1), NoopDelay);
     let mut data = [0; 4];
     iface.read(0x0F00, &mut data).await.unwrap();
     assert_eq!(data, [0xD1, 0x15, 0x1B, 0x00]);
@@ -49,7 +50,7 @@ async fn write_sends_header_then_data() {
         Spi::write_vec(vec![0x02]),
         Spi::flush(),
     ]);
-    let mut iface = SpiInterface::new(spi, cs(1));
+    let mut iface = SpiInterface::new(spi, cs(1), NoopDelay);
     iface.write(0x0000, &[0x02]).await.unwrap();
     check(iface);
 }
@@ -63,7 +64,7 @@ async fn waits_until_tpm_is_ready() {
         Spi::read_vec(vec![0xA1]),
         Spi::flush(),
     ]);
-    let mut iface = SpiInterface::new(spi, cs(1));
+    let mut iface = SpiInterface::new(spi, cs(1), NoopDelay);
     let mut data = [0];
     iface.read(0x0000, &mut data).await.unwrap();
     assert_eq!(data, [0xA1]);
@@ -74,7 +75,7 @@ async fn waits_until_tpm_is_ready() {
 async fn gives_up_after_max_wait_states_and_releases_cs() {
     let mut expected = vec![header(true, 1, 0x0000, 0x00)];
     expected.extend((0..MAX_WAIT_STATES).map(|_| Spi::read(0x00)));
-    let mut iface = SpiInterface::new(SpiMock::new(&expected), cs(1));
+    let mut iface = SpiInterface::new(SpiMock::new(&expected), cs(1), NoopDelay);
     let mut data = [0];
     let result = iface.read(0x0000, &mut data).await;
     assert!(matches!(result, Err(SpiError::WaitState)), "{result:?}");
@@ -93,7 +94,7 @@ async fn splits_long_transfers_into_64_byte_frames() {
         Spi::write_vec(data[64..].to_vec()),
         Spi::flush(),
     ]);
-    let mut iface = SpiInterface::new(spi, cs(2));
+    let mut iface = SpiInterface::new(spi, cs(2), NoopDelay);
     iface.write(fifo, &data).await.unwrap();
     check(iface);
 }
