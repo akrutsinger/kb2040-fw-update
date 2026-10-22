@@ -157,6 +157,7 @@ async fn stage<DFU: NorFlash, STATE: NorFlash>(
     }
     serial.write_packet(b"A").await?;
 
+    // ANCHOR: stage
     let mut block = [0u8; BLOCK_SIZE];
     for offset in (0..len).step_by(BLOCK_SIZE) {
         read_exact(serial, &mut block).await?;
@@ -187,6 +188,7 @@ async fn stage<DFU: NorFlash, STATE: NorFlash>(
             // Reading the image back, or writing the mark.
             FirmwareUpdaterError::Flash(_) => Error::FlashVerify,
         })
+    // ANCHOR_END: stage
 }
 
 /// Fill `buf` from as many packets as it takes.

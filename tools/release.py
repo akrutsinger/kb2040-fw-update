@@ -83,6 +83,7 @@ def main():
         sys.exit(f"{path} doesn't contain version {version}; rebuild it after bumping the version")
     kek = release_kek()
 
+    # ANCHOR: encrypt
     content_key = os.urandom(16)
     iv = os.urandom(16)
     encryptor = Cipher(algorithms.AES(content_key), modes.CTR(iv)).encryptor()
@@ -90,6 +91,7 @@ def main():
     nonce = os.urandom(12)
     wrapped = nonce + AESGCM(kek).encrypt(nonce, content_key, RELEASE_KEY_AAD + version.encode())
     record = {"size": len(encrypted), "iv": iv.hex(), "key": wrapped.hex()}
+    # ANCHOR_END: encrypt
 
     with tempfile.TemporaryDirectory() as tmp:
         image = Path(tmp) / f"{version}.bin"

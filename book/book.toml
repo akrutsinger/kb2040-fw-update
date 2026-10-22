@@ -1,0 +1,14 @@
+[book]
+title = "kb2040-fw-update"
+authors = ["Austyn Krutsinger"]
+description = "Encrypted firmware updates for the Adafruit KB2040, step by step"
+language = "en"
+
+[output.html]
+site-url = "/kb2040-fw-update/"
+git-repository-url = "https://github.com/akrutsinger/kb2040-fw-update"
+edit-url-template = "https://github.com/akrutsinger/kb2040-fw-update/edit/main/book/{path}"
+
+# The snippets are firmware and host tools, not something the Rust playground can run.
+[output.html.playground]
+runnable = false

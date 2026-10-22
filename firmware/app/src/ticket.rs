@@ -56,6 +56,7 @@ impl fmt::Display for Error {
     }
 }
 
+// ANCHOR: open
 /// Opens `sealed` (ciphertext and tag, decrypted in place), with `enc`, the server's one-time
 /// public key. `nonce` is the one this board signed in its update request.
 pub async fn open(
@@ -81,6 +82,7 @@ pub async fn open(
     }
     Ok(ticket)
 }
+// ANCHOR_END: open
 
 /// The fields of an opened ticket, and its nonce. The version after them isn't needed.
 fn parse(plaintext: &[u8]) -> Option<(Ticket, &[u8; NONCE_LEN])> {

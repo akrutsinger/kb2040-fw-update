@@ -56,6 +56,7 @@ pub async fn sign_challenge(tpm: &mut Tpm, nonce: &[u8; NONCE_LEN]) -> Result<Si
     sign(tpm, hash).await
 }
 
+// ANCHOR: sign-request
 /// Signs an update request with the identity key, creating the key on first use. `nonce` comes
 /// from the update server, so the request can't be replayed later; the version is last, so it
 /// needs no length.
@@ -66,6 +67,7 @@ pub async fn sign_request(tpm: &mut Tpm, nonce: &[u8; NONCE_LEN]) -> Result<Sign
         .chain_update(VERSION);
     sign(tpm, hash).await
 }
+// ANCHOR_END: sign-request
 
 /// ECDH with the decryption key: the x-coordinate of `point` times its private key, which stays in
 /// the TPM, and the decryption key itself. Only [`crate::ticket`] uses it. A console command for it

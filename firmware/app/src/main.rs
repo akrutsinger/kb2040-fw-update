@@ -115,6 +115,7 @@ async fn main(spawner: Spawner) {
     let mut aligned = AlignedBuffer([0; WRITE_SIZE]);
     let mut updater = BlockingFirmwareUpdater::new(config, &mut aligned.0);
 
+    // ANCHOR: trial-boot
     // Until this image calls `mark_booted`, any reset (panic, watchdog, power loss) makes the
     // bootloader roll back to the previous image. Nobody is listening on the console this early,
     // so failures are kept in the note that `status` prints instead of being logged.
@@ -136,6 +137,7 @@ async fn main(spawner: Spawner) {
         Ok(_) => "normal",
         Err(_) => "couldn't read boot state",
     };
+    // ANCHOR_END: trial-boot
 
     let mut ctx = console::Context {
         boot,

@@ -126,6 +126,7 @@ async function update(request: Request, env: Env): Promise<Response> {
   if (!record) {
     return error(403, "unknown device, enroll it with tools/enroll.py");
   }
+  // ANCHOR: verify-request
   const key = await crypto.subtle.importKey(
     "raw",
     fromHex(record.identity, 65)!,
@@ -140,6 +141,7 @@ async function update(request: Request, env: Env): Promise<Response> {
   ) {
     return error(403, "bad signature");
   }
+  // ANCHOR_END: verify-request
 
   const latest = await env.KV.get("release:latest");
   const update =
@@ -168,6 +170,7 @@ async function offer(
   if (!release) {
     throw new Error(`release:latest is ${version}, but release:${version} is missing`);
   }
+  // ANCHOR: seal-ticket
   const size = new Uint8Array(4);
   new DataView(size.buffer).setUint32(0, release.size, true);
   const ticket = concat(
@@ -187,6 +190,7 @@ async function offer(
     { recipientPublicKey, info: concat(TICKET_INFO, deviceId) },
     ticket,
   );
+  // ANCHOR_END: seal-ticket
   return {
     version,
     size: release.size,
@@ -246,6 +250,7 @@ function newer(a: string, b: string): boolean {
   return false;
 }
 
+// ANCHOR: nonce
 /**
  * A nonce the server can check later without storing it:
  * `expiry (8 bytes, big-endian Unix seconds) || random (8) || HMAC-SHA256(NONCE_KEY, first 16)[..16]`.
@@ -274,6 +279,7 @@ async function checkNonce(env: Env, nonce: Uint8Array): Promise<string | null> {
   }
   return null;
 }
+// ANCHOR_END: nonce
 
 async function mac(env: Env, data: Uint8Array): Promise<Uint8Array> {
   const keyBytes = fromHex(env.NONCE_KEY ?? "", 32);

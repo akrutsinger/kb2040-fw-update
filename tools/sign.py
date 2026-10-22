@@ -43,6 +43,7 @@ def load_key():
     return key
 
 
+# ANCHOR: sign
 def sign(path):
     key = load_key()
     image = Path(path).read_bytes()
@@ -53,6 +54,7 @@ def sign(path):
     out = Path(path).with_suffix(".signed")
     out.write_bytes(image + signature)
     print(f"wrote {out} ({len(image)} byte image + signature)")
+# ANCHOR_END: sign
 
 
 def main():
