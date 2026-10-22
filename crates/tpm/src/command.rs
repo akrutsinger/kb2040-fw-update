@@ -62,7 +62,9 @@ impl Handle for Persistent {
 /// A P-256 public key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PublicKey {
+    /// X coordinate, big-endian.
     pub x: [u8; 32],
+    /// Y coordinate, big-endian.
     pub y: [u8; 32],
 }
 
@@ -92,7 +94,9 @@ impl PublicKey {
 /// An ECDSA P-256 signature.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Signature {
+    /// `r`, big-endian.
     pub r: [u8; 32],
+    /// `s`, big-endian.
     pub s: [u8; 32],
 }
 

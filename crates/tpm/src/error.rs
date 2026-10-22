@@ -10,17 +10,24 @@ use tpm2_protocol::data::TpmRc;
 pub enum Error<E> {
     /// The bus failed, or the TPM didn't answer on it.
     Bus(E),
-    /// The TPM didn't make locality 0 active within `TIMEOUT_A` (750 ms). `access` is the last
-    /// `TPM_ACCESS` value read, see [`Access`](crate::registers::Access).
-    LocalityTimeout { access: u8 },
-    /// `TPM_STS` didn't reach the expected state in time. `sts` is the last value read, see
-    /// [`Sts`](crate::registers::Sts).
-    StatusTimeout { sts: u8 },
+    /// The TPM didn't make locality 0 active within `TIMEOUT_A` (750 ms).
+    LocalityTimeout {
+        /// Last `TPM_ACCESS` read, see [`Access`](crate::registers::Access).
+        access: u8,
+    },
+    /// `TPM_STS` didn't reach the expected state in time.
+    StatusTimeout {
+        /// Last `TPM_STS` read, see [`Sts`](crate::registers::Sts).
+        sts: u8,
+    },
     /// The TPM wanted more or fewer command bytes than the command's header says, sent more
     /// response bytes than its header says, or sent a header with an impossible size.
     Fifo,
-    /// The response doesn't fit the buffer. `needed` is the size from its header.
-    ResponseTooLarge { needed: usize },
+    /// The response doesn't fit the buffer.
+    ResponseTooLarge {
+        /// Size from the response header.
+        needed: usize,
+    },
     /// A command couldn't be encoded, or a response decoded (`tpm2-protocol`'s error).
     Protocol(TpmError),
     /// The TPM returned this response code (TPM 2.0 spec part 2, section 6.6).

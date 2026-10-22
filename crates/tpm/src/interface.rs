@@ -12,6 +12,7 @@ pub use spi::SpiInterface;
 /// access covers consecutive bytes of one register (all 4 bytes of `DID_VID`, for example), or
 /// streams bytes through the data FIFO.
 pub trait Interface {
+    /// Bus error.
     type Error;
 
     /// Writes `data` to the register at `addr`.

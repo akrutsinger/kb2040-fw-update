@@ -37,6 +37,7 @@ pub struct Tpm<I, D> {
 }
 
 impl<I: Interface, D: DelayNs> Tpm<I, D> {
+    /// A TPM on `iface`, polled with `delay`.
     pub fn new(iface: I, delay: D) -> Self {
         Self { iface, delay }
     }
