@@ -6,7 +6,7 @@
 use core::cell::RefCell;
 
 use cortex_m_rt::{entry, exception};
-use embassy_boot_rp::*;
+use embassy_boot_rp::{BootLoader, BootLoaderConfig, WatchdogFlash};
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_time::Duration;
 
