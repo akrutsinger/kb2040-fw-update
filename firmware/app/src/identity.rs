@@ -68,11 +68,14 @@ pub async fn sign_request(tpm: &mut Tpm, nonce: &[u8; NONCE_LEN]) -> Result<Sign
 }
 
 /// ECDH with the decryption key: the x-coordinate of `point` times its private key, which stays in
-/// the TPM. Only [`crate::ticket`] uses it. A console command for it would let anyone at the USB
-/// port decrypt update tickets.
-pub async fn decryption_dh(tpm: &mut Tpm, point: &PublicKey) -> Result<[u8; 32], TpmError> {
-    key(tpm, KeyKind::Decrypt).await?;
-    tpm.ecdh_zgen(DECRYPT_HANDLE, point).await
+/// the TPM, and the decryption key itself. Only [`crate::ticket`] uses it. A console command for it
+/// would let anyone at the USB port decrypt update tickets.
+pub async fn decryption_dh(
+    tpm: &mut Tpm,
+    point: &PublicKey,
+) -> Result<([u8; 32], PublicKey), TpmError> {
+    let (key, _) = key(tpm, KeyKind::Decrypt).await?;
+    Ok((tpm.ecdh_zgen(DECRYPT_HANDLE, point).await?, key))
 }
 
 async fn sign(tpm: &mut Tpm, hash: Sha256) -> Result<Signature, TpmError> {

@@ -76,8 +76,7 @@ pub async fn open(
         y: y.try_into().unwrap(),
     };
     // The TPM refuses points that aren't on the curve.
-    let dh = identity::decryption_dh(tpm, &point).await?;
-    let (decrypt, _) = identity::key(tpm, KeyKind::Decrypt).await?;
+    let (dh, decrypt) = identity::decryption_dh(tpm, &point).await?;
     let (signing, _) = identity::key(tpm, KeyKind::Signing).await?;
 
     let mut info = [0; TICKET_INFO.len() + 16];
