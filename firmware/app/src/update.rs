@@ -144,7 +144,9 @@ async fn stage<DFU: NorFlash, STATE: NorFlash>(
 ) -> Result<(), Error> {
     let mut len = [0u8; 4];
     read_exact(serial, &mut len).await?;
-    let len = u32::from_le_bytes(len) as usize;
+    // `verify_and_mark_updated` takes the length as a `u32`, the rest as a `usize`.
+    let len_u32 = u32::from_le_bytes(len);
+    let len = len_u32 as usize;
     if len == 0 || !len.is_multiple_of(BLOCK_SIZE) || len > active_size() {
         return Err(Error::BadLength);
     }
@@ -178,7 +180,7 @@ async fn stage<DFU: NorFlash, STATE: NorFlash>(
     }
     // Blocks the executor (and the watchdog feeder) while it hashes the image.
     updater
-        .verify_and_mark_updated(UPDATE_KEY, &signature, len as u32)
+        .verify_and_mark_updated(UPDATE_KEY, &signature, len_u32)
         .map_err(|e| match e {
             FirmwareUpdaterError::Signature(_) => Error::Signature,
             FirmwareUpdaterError::BadState => Error::NotConfirmed,
