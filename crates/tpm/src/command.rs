@@ -74,6 +74,19 @@ impl PublicKey {
         out[33..].copy_from_slice(&self.y);
         out
     }
+
+    /// Parses a SEC1 uncompressed point, `04 || x || y`. `None` for any other encoding or length.
+    /// Doesn't check that the point is on the curve; the TPM does when it uses it.
+    pub fn from_sec1(sec1: &[u8]) -> Option<Self> {
+        let [0x04, point @ ..] = sec1 else {
+            return None;
+        };
+        let (x, y) = point.split_first_chunk()?;
+        Some(Self {
+            x: *x,
+            y: y.try_into().ok()?,
+        })
+    }
 }
 
 /// An ECDSA P-256 signature.

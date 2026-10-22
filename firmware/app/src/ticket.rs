@@ -15,8 +15,6 @@ use crate::{Tpm, TpmError};
 
 /// Must match `TICKET_INFO` in `worker/src/index.ts`.
 const TICKET_INFO: &[u8] = b"kb2040-fw-update/ticket/v1";
-/// Everything before the version.
-const FIXED_LEN: usize = 16 + 16 + 4 + NONCE_LEN;
 
 /// An opened ticket: how to decrypt the release.
 pub struct Ticket {
@@ -66,15 +64,7 @@ pub async fn open(
     sealed: &mut [u8],
     nonce: &[u8; NONCE_LEN],
 ) -> Result<Ticket, Error> {
-    let [0x04, point @ ..] = enc else {
-        return Err(Error::BadEnc);
-    };
-    let point: &[u8] = point;
-    let (x, y) = point.split_at(32);
-    let point = PublicKey {
-        x: x.try_into().unwrap(),
-        y: y.try_into().unwrap(),
-    };
+    let point = PublicKey::from_sec1(enc).ok_or(Error::BadEnc)?;
     // The TPM refuses points that aren't on the curve.
     let (dh, decrypt) = identity::decryption_dh(tpm, &point).await?;
     let (signing, _) = identity::key(tpm, KeyKind::Signing).await?;
@@ -85,18 +75,23 @@ pub async fn open(
     let plaintext =
         hpke::open(&dh, enc, &decrypt.to_sec1(), &info, &[], sealed).map_err(|_| Error::Open)?;
 
-    let Some((fixed, _version)) = plaintext.split_at_checked(FIXED_LEN) else {
-        return Err(Error::Format);
-    };
-    let (key, rest) = fixed.split_at(16);
-    let (iv, rest) = rest.split_at(16);
-    let (size, ticket_nonce) = rest.split_at(4);
+    let (ticket, ticket_nonce) = parse(plaintext).ok_or(Error::Format)?;
     if ticket_nonce != nonce {
         return Err(Error::Nonce);
     }
-    Ok(Ticket {
-        key: key.try_into().unwrap(),
-        iv: iv.try_into().unwrap(),
-        size: u32::from_le_bytes(size.try_into().unwrap()),
-    })
+    Ok(ticket)
+}
+
+/// The fields of an opened ticket, and its nonce. The version after them isn't needed.
+fn parse(plaintext: &[u8]) -> Option<(Ticket, &[u8; NONCE_LEN])> {
+    let (key, rest) = plaintext.split_first_chunk()?;
+    let (iv, rest) = rest.split_first_chunk()?;
+    let (size, rest) = rest.split_first_chunk()?;
+    let (nonce, _version) = rest.split_first_chunk()?;
+    let ticket = Ticket {
+        key: *key,
+        iv: *iv,
+        size: u32::from_le_bytes(*size),
+    };
+    Some((ticket, nonce))
 }
