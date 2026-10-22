@@ -10,7 +10,11 @@
 //! The register interface and its SPI framing come from the TCG "PC Client Platform TPM Profile
 //! (PTP) Specification", Family 2.0.
 
-#![allow(async_fn_in_trait)]
+#![expect(
+    async_fn_in_trait,
+    reason = "embedded executors such as embassy's are single-threaded and don't need `Send` \
+              futures; embedded-hal-async makes the same choice"
+)]
 #![no_std]
 
 pub mod command;
