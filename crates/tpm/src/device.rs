@@ -30,10 +30,10 @@ pub struct Id {
     pub rid: u8,
 }
 
-/// A TPM on interface `I`. `D` paces polling.
+/// A TPM on interface `I`. `D` paces polling and retries.
 pub struct Tpm<I, D> {
     iface: I,
-    delay: D,
+    pub(crate) delay: D,
 }
 
 impl<I: Interface, D: DelayNs> Tpm<I, D> {

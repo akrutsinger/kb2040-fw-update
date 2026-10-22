@@ -156,6 +156,43 @@ async fn tpm_errors_come_back_as_response_codes() {
     );
 }
 
+#[tokio::test]
+async fn testing_is_retried_until_the_command_runs() {
+    let mut sent = 0;
+    let backend = |_: &[u8]| {
+        sent += 1;
+        if sent < 3 {
+            // TPM_RC_TESTING.
+            vec![0x80, 0x01, 0, 0, 0, 0x0A, 0, 0, 0x09, 0x0A]
+        } else {
+            vec![0x80, 0x01, 0, 0, 0, 0x0A, 0, 0, 0, 0]
+        }
+    };
+    let mut tpm = Tpm::new(FifoTpm::new(backend), NoopDelay);
+    tpm.startup().await.unwrap();
+    drop(tpm);
+    assert_eq!(sent, 3);
+}
+
+#[tokio::test]
+async fn retry_gives_up_after_eight_tries_like_linux() {
+    let mut sent = 0;
+    let backend = |_: &[u8]| {
+        sent += 1;
+        // TPM_RC_RETRY.
+        vec![0x80, 0x01, 0, 0, 0, 0x0A, 0, 0, 0x09, 0x22]
+    };
+    let mut tpm = Tpm::new(FifoTpm::new(backend), NoopDelay);
+    let result = tpm.startup().await;
+    assert!(
+        matches!(result, Err(tpm::Error::Tpm(rc)) if rc.base() == TpmRcBase::Retry),
+        "{result:?}"
+    );
+    drop(tpm);
+    // Waits of 20, 40, ..., 1280 ms between them.
+    assert_eq!(sent, 8);
+}
+
 /// A swtpm process with a fresh state directory, killed on drop.
 struct Swtpm {
     child: Child,

@@ -30,6 +30,10 @@ use crate::interface::Interface;
 const COMMAND_LEN: usize = 128;
 /// Big enough for every response here. CreatePrimary's is the largest, about 300 bytes.
 const RESPONSE_LEN: usize = 512;
+/// `TPM_RC_RETRY` and `TPM_RC_TESTING` are retried as Linux does (`tpm_transmit`): first after
+/// 20 ms, then doubling the wait while it's at most 2 s.
+const RETRY_FIRST_MS: u32 = 20;
+const RETRY_LAST_MS: u32 = 2000;
 
 /// The handle of a key [`Tpm::create_key`] loaded. Not `Copy`: [`Tpm::flush`] takes it, so it
 /// can't be used after.
@@ -250,8 +254,8 @@ impl<I: Interface, D: DelayNs> Tpm<I, D> {
         }
     }
 
-    /// Runs a command and decodes its response. A response code other than success comes back
-    /// as [`Error::Tpm`].
+    /// Runs a command and decodes its response, retrying `TPM_RC_RETRY` and `TPM_RC_TESTING`.
+    /// Any other response code than success comes back as [`Error::Tpm`].
     async fn run<C: TpmFrame, R: TpmUnmarshalBody>(
         &mut self,
         command: &C,
@@ -268,18 +272,29 @@ impl<I: Interface, D: DelayNs> Tpm<I, D> {
         let command_len = writer.len();
 
         let mut response_buf = [0; RESPONSE_LEN];
-        let len = self
-            .execute(&command_buf[..command_len], &mut response_buf)
-            .await?;
-        // A TPM 1.2 answers TPM 2.0 commands in its own format, tagged TPM_ST_RSP_COMMAND. A TPM 2.0
-        // only uses that tag to reject a command with a bad tag, which this driver never sends.
-        if u16::from_be_bytes([response_buf[0], response_buf[1]]) == TpmSt::RspCommand as u16 {
-            return Err(Error::Tpm12);
-        }
-        let response = TpmResponse::cast(&response_buf[..len]).map_err(Error::Protocol)?;
-        match response.rc().map_err(Error::Protocol)? {
-            TpmRc::Fmt0(TpmRcBase::Success) => response.unmarshal().map_err(Error::Protocol),
-            rc => Err(Error::Tpm(rc)),
+        let mut retry_ms = RETRY_FIRST_MS;
+        loop {
+            let len = self
+                .execute(&command_buf[..command_len], &mut response_buf)
+                .await?;
+            // A TPM 1.2 answers TPM 2.0 commands in its own format, tagged TPM_ST_RSP_COMMAND. A
+            // TPM 2.0 only uses that tag to reject a command with a bad tag, which this driver
+            // never sends.
+            if u16::from_be_bytes([response_buf[0], response_buf[1]]) == TpmSt::RspCommand as u16 {
+                return Err(Error::Tpm12);
+            }
+            let response = TpmResponse::cast(&response_buf[..len]).map_err(Error::Protocol)?;
+            match response.rc().map_err(Error::Protocol)? {
+                TpmRc::Fmt0(TpmRcBase::Success) => {
+                    return response.unmarshal().map_err(Error::Protocol);
+                }
+                // The command didn't run, so sending it again is safe.
+                TpmRc::Warn(TpmRcBase::Retry | TpmRcBase::Testing) if retry_ms <= RETRY_LAST_MS => {
+                    self.delay.delay_ms(retry_ms).await;
+                    retry_ms *= 2;
+                }
+                rc => return Err(Error::Tpm(rc)),
+            }
         }
     }
 }
