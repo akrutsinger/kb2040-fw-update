@@ -25,6 +25,9 @@ fn main() -> ! {
     let active_offset = config.active.offset();
     let bl: BootLoader = BootLoader::prepare(config);
 
+    // SAFETY: `load` jumps to the vector table at the start of ACTIVE. The app is linked to start
+    // there (the shared layout), and `prepare` has already finished any swap or rollback, so ACTIVE
+    // holds a whole image: the flashed one, or one the app staged after checking its signature.
     unsafe { bl.load(embassy_rp::flash::FLASH_BASE as u32 + active_offset) }
 }
 
@@ -37,6 +40,7 @@ unsafe extern "C" fn HardFault() {
 #[exception]
 unsafe fn DefaultHandler(_: i16) -> ! {
     const SCB_ICSR: *const u32 = 0xE000_ED04 as *const u32;
+    // SAFETY: ICSR is a core register, always mapped and readable.
     let irqn = unsafe { core::ptr::read_volatile(SCB_ICSR) } as u8 as i16 - 16;
 
     panic!("DefaultHandler #{:?}", irqn);
