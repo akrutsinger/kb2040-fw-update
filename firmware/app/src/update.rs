@@ -78,11 +78,7 @@ impl fmt::Display for Error {
             Error::FlashVerify => "flash error while verifying the image",
             Error::Signature => "signature check failed",
             Error::NoRequest => "no update request since boot, run 'request' first",
-            Error::Ticket(ticket::Error::Tpm(e)) => return write!(f, "opening the ticket: {e}"),
-            Error::Ticket(ticket::Error::BadEnc) => "ticket's enc isn't a P-256 point",
-            Error::Ticket(ticket::Error::Open) => "ticket doesn't open, is it for this board?",
-            Error::Ticket(ticket::Error::Format) => "ticket too short",
-            Error::Ticket(ticket::Error::Nonce) => "ticket answers a different request",
+            Error::Ticket(e) => return e.fmt(f),
             Error::SizeMismatch => "image length doesn't match the ticket",
         })
     }

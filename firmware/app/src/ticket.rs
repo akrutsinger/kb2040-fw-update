@@ -5,6 +5,8 @@
 //! sealed with HPKE to the decryption key, with `TICKET_INFO || device id` as `info`. The device id
 //! is the first 16 bytes of SHA-256(identity key), as the server names boards.
 
+use core::fmt;
+
 use sha2::{Digest, Sha256};
 use tpm::{KeyKind, PublicKey};
 
@@ -41,6 +43,18 @@ pub enum Error {
 impl From<TpmError> for Error {
     fn from(e: TpmError) -> Self {
         Error::Tpm(e)
+    }
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Error::BadEnc => write!(f, "ticket's enc isn't a P-256 point"),
+            Error::Tpm(e) => write!(f, "opening the ticket: {e}"),
+            Error::Open => write!(f, "ticket doesn't open, is it for this board?"),
+            Error::Format => write!(f, "ticket too short"),
+            Error::Nonce => write!(f, "ticket answers a different request"),
+        }
     }
 }
 
